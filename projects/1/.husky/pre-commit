@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Run linting and store the exit code
+npm run lint
+if [ $? -ne 0 ]; then
+  echo "❌ Linting failed. Please fix the errors before committing."
+  exit 1
+fi
+
+# Run formatting
+npm run format
+
+# Check if any files were modified by formatting
+if [ -n "$(git diff)" ]; then
+  echo "❌ Formatting changed some files. Please stage the changes and try committing again."
+  exit 1
+fi
+
+echo "✅ Pre-commit checks passed!"

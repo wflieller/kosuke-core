@@ -11,7 +11,7 @@ Today the first open-source vibe-coding platform, tomorrow the next geneation "I
 cp .env.example .env
 docker compose up -d
 # run the database migrations
-npm run db:migrate
+npm run db:push
 # seed the db with a User.
 npm run db:seed
 ```

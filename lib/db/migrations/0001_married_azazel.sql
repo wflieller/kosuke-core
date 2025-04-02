@@ -1,0 +1,1 @@
+ALTER TABLE "chat_messages" ADD COLUMN "model_type" varchar(20);
