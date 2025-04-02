@@ -62,19 +62,19 @@ async function saveUploadedImage(file: File, projectId: number): Promise<string>
 
 /**
  * Process a FormData request and extract the content and image
- * @deprecated This function may be used elsewhere in the codebase
  */
-/* eslint-disable @typescript-eslint/no-unused-vars */
 async function processFormDataRequest(req: NextRequest, projectId: number): Promise<{ 
   content: string; 
   includeContext: boolean; 
   contextFiles: Array<{ name: string; content: string; }>;
   imageUrl?: string; 
+  pipelineType?: string;
 }> {
   const formData = await req.formData();
   const content = formData.get('content') as string || '';
   const includeContext = formData.get('includeContext') === 'true';
   const contextFilesStr = formData.get('contextFiles') as string || '[]';
+  const pipelineType = formData.get('pipelineType') as string;
   const contextFiles = JSON.parse(contextFilesStr);
   
   // Process image if present
@@ -89,8 +89,86 @@ async function processFormDataRequest(req: NextRequest, projectId: number): Prom
     content,
     includeContext,
     contextFiles,
-    imageUrl
+    imageUrl,
+    pipelineType
   };
+}
+
+/**
+ * Extract image URLs from prompt content
+ * Currently used by the convertToMultiModalContent function for future implementation.
+ */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+function extractImageUrls(prompt: string): string[] {
+  // Regular expression to match Markdown image links
+  const imageRegex = /\[Attached Image\]\(([^)]+)\)/g;
+  const imageUrls: string[] = [];
+  let match;
+
+  while ((match = imageRegex.exec(prompt)) !== null) {
+    // Extract the actual image URL from the markdown link
+    const imageUrl = match[1];
+    // Ensure URLs are properly formed
+    if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
+      imageUrls.push(imageUrl);
+    }
+  }
+
+  return imageUrls;
+}
+/* eslint-enable @typescript-eslint/no-unused-vars */
+
+/**
+ * Convert a text prompt with image URLs to multi-modal content
+ * This function is intended for use with AI models that support multimodal inputs.
+ * Currently, it's kept for future use with the Agent class.
+ */
+/* eslint-disable @typescript-eslint/no-unused-vars */
+function convertToMultiModalContent(
+  prompt: string
+): Array<{ type: 'text' | 'image' | 'image_url'; text?: string; image_url?: { url: string } }> {
+  const imageUrls = extractImageUrls(prompt);
+
+  // If no images, return simple text content
+  if (imageUrls.length === 0) {
+    return [{ type: 'text', text: prompt }];
+  }
+
+  // Replace image URLs with placeholders to split the text
+  let processedText = prompt;
+  const imagePlaceholders: Map<string, string> = new Map();
+
+  imageUrls.forEach((url, index) => {
+    const placeholder = `__IMAGE_PLACEHOLDER_${index}__`;
+    processedText = processedText.replace(`[Attached Image](${url})`, placeholder);
+    imagePlaceholders.set(placeholder, url);
+  });
+
+  // Split text by placeholders and create multi-modal content
+  const parts: Array<{
+    type: 'text' | 'image' | 'image_url';
+    text?: string;
+    image_url?: { url: string };
+  }> = [];
+  const segments = processedText.split(/(__IMAGE_PLACEHOLDER_\d+__)/);
+
+  segments.forEach(segment => {
+    if (imagePlaceholders.has(segment)) {
+      // This is an image placeholder
+      parts.push({
+        type: 'image_url',
+        image_url: { url: imagePlaceholders.get(segment)! },
+      });
+    } else if (segment.trim()) {
+      // This is a text segment
+      parts.push({
+        type: 'text',
+        text: segment.trim(),
+      });
+    }
+  });
+
+  return parts;
 }
 /* eslint-enable @typescript-eslint/no-unused-vars */
 
@@ -247,32 +325,51 @@ export async function POST(
       console.error('Error checking message limit:', error);
     }
 
-    // Parse and validate the request body
-    const body = await req.json();
-    console.log('Request body:', JSON.stringify(body));
-    
-    const parseResult = sendMessageSchema.safeParse(body);
-    
-    if (!parseResult.success) {
-      console.error('Invalid request format:', parseResult.error);
-      return NextResponse.json(
-        { error: 'Invalid request format', details: parseResult.error.format() },
-        { status: 400 }
-      );
-    }
-    
-    // Extract content and pipelineType based on the format received
+    // Check if request is FormData or JSON
+    const contentType = req.headers.get('content-type') || '';
     let messageContent: string;
     let rawPipelineType: string | undefined;
+    let imageUrl: string | undefined;
     
-    if ('message' in parseResult.data) {
-      // Format: { message: { content, pipelineType } }
-      messageContent = parseResult.data.message.content;
-      rawPipelineType = parseResult.data.message.pipelineType;
+    if (contentType.includes('multipart/form-data')) {
+      // Process FormData request
+      console.log('Processing multipart/form-data request');
+      const formData = await processFormDataRequest(req, projectId);
+      messageContent = formData.content;
+      rawPipelineType = formData.pipelineType;
+      imageUrl = formData.imageUrl;
+      
+      if (imageUrl) {
+        console.log(`Image URL received: ${imageUrl}`);
+        // Add image URL to message content as markdown link
+        messageContent = `${messageContent}\n\n[Attached Image](${imageUrl})`;
+      }
     } else {
-      // Format: { content, pipelineType }
-      messageContent = parseResult.data.content;
-      rawPipelineType = parseResult.data.pipelineType;
+      // Process JSON request
+      console.log('Processing JSON request');
+      const body = await req.json();
+      console.log('Request body:', JSON.stringify(body));
+      
+      const parseResult = sendMessageSchema.safeParse(body);
+      
+      if (!parseResult.success) {
+        console.error('Invalid request format:', parseResult.error);
+        return NextResponse.json(
+          { error: 'Invalid request format', details: parseResult.error.format() },
+          { status: 400 }
+        );
+      }
+      
+      // Extract content and pipelineType based on the format received
+      if ('message' in parseResult.data) {
+        // Format: { message: { content, pipelineType } }
+        messageContent = parseResult.data.message.content;
+        rawPipelineType = parseResult.data.message.pipelineType;
+      } else {
+        // Format: { content, pipelineType }
+        messageContent = parseResult.data.content;
+        rawPipelineType = parseResult.data.pipelineType;
+      }
     }
     
     // Map string pipeline type to enum
@@ -288,6 +385,12 @@ export async function POST(
 
     console.log(`Received message content: "${messageContent.substring(0, 50)}${messageContent.length > 50 ? '...' : ''}"`);
     console.log(`Using pipeline type: ${pipelineType}`);
+
+    // Check if the message contains image references
+    const hasImages = messageContent.includes('[Attached Image]');
+    if (hasImages) {
+      console.log('Detected images in the message');
+    }
 
     // Save the user message to the database
     await db.insert(chatMessages).values({
