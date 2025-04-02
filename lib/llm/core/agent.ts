@@ -8,7 +8,8 @@ import { getProjectPath } from '../../fs/operations';
 import { getTool } from '../tools';
 import { PipelineType, Pipeline } from '../pipelines/types';
 import { getPipeline } from '../pipelines';
-import { Action } from './types';
+import { Action, normalizeAction } from './types';
+import { generateAICompletion } from '../api/ai-sdk';
 
 /**
  * Agent class responsible for orchestrating project modifications and handling UI updates
@@ -79,27 +80,37 @@ export class Agent {
 
       try {
         // Create a placeholder assistant message
+        console.log('📝 Creating placeholder message for status updates...');
         const initialResult = await this.sendOperationUpdate(
           'edit', // Operation type doesn't matter for placeholder
           '', // No specific file path
           "I'm analyzing your request and preparing to make changes...",
           'pending'
         );
+        console.log(`📝 Placeholder message created: ${JSON.stringify(initialResult)}`);
 
         console.log(
           `🔄 Starting pipeline processing with prompt: "${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}"`
         );
 
         // Run the pipeline
-        let pipelineResult: { actions?: Action[] };
+        let pipelineResult: { success: boolean; error?: string; actions?: Action[] };
         try {
-          pipelineResult = await Promise.race([
+          console.log('⏳ Running pipeline.processPrompt with timeout race...');
+          pipelineResult = (await Promise.race([
             this.pipeline.processPrompt(this.projectId, prompt),
             timeoutPromise,
-          ]);
+          ])) as { success: boolean; error?: string; actions?: Action[] };
+          console.log(`✅ Pipeline processing completed successfully`);
+          console.log(`📊 Pipeline result success: ${pipelineResult.success}`);
+          console.log(`📊 Pipeline result error: ${pipelineResult.error || 'none'}`);
           console.log(
-            `✅ Pipeline processing completed. Result: ${JSON.stringify(pipelineResult, null, 2)}`
+            `📊 Pipeline result actions: ${pipelineResult.actions ? pipelineResult.actions.length : 0}`
           );
+          if (pipelineResult.actions && pipelineResult.actions.length > 0) {
+            console.log(`📊 First action: ${JSON.stringify(pipelineResult.actions[0])}`);
+          }
+          console.log(`📊 Full pipeline result: ${JSON.stringify(pipelineResult, null, 2)}`);
         } catch (pipelineError) {
           console.error(`❌ Pipeline processing error:`, pipelineError);
           throw pipelineError;
@@ -113,7 +124,9 @@ export class Agent {
         if (pipelineResult.actions && pipelineResult.actions.length > 0) {
           console.log(`🔄 Found ${pipelineResult.actions.length} actions to execute:`);
           pipelineResult.actions.forEach((action: Action, index: number) => {
-            console.log(`   Action ${index + 1}: ${action.action} on ${action.filePath}`);
+            console.log(
+              `   Action ${index + 1}: ${action.action} on ${action.filePath} (message: ${action.message.substring(0, 50)}...)`
+            );
           });
 
           // Execute each action in sequence
@@ -122,9 +135,14 @@ export class Agent {
             console.log(
               `⏳ Executing action ${index + 1}/${pipelineResult.actions.length}: ${action.action} on ${action.filePath}`
             );
+            console.log(`💾 Action details: ${JSON.stringify(action, null, 2)}`);
+
+            const actionStart = Date.now();
             const actionSuccess = await this.executeAction(action);
+            const actionEnd = Date.now();
+
             console.log(
-              `${actionSuccess ? '✅' : '❌'} Action ${index + 1} execution ${actionSuccess ? 'succeeded' : 'failed'}`
+              `${actionSuccess ? '✅' : '❌'} Action ${index + 1} execution ${actionSuccess ? 'succeeded' : 'failed'} in ${actionEnd - actionStart}ms`
             );
 
             if (!actionSuccess) {
@@ -144,6 +162,7 @@ export class Agent {
 
             // Update the message content with the summary
             if (initialResult.message?.id) {
+              console.log(`📝 Updating message ${initialResult.message.id} with summary...`);
               await db
                 .update(chatMessages)
                 .set({
@@ -153,26 +172,31 @@ export class Agent {
                 .where(eq(chatMessages.id, initialResult.message.id));
 
               console.log(`✅ Updated message content with summary`);
+            } else {
+              console.error(`❌ No message ID found in initialResult to update with summary`);
             }
           } else {
+            console.log(`⚠️ Some actions failed to execute, sending error update...`);
             await this.sendOperationUpdate(
               'error',
               '',
               `I encountered some issues while making the requested changes. Please check the operation log for details.`,
               'error'
             );
-            console.log(`⚠️ Some actions failed to execute`);
+            console.log(`⚠️ Error update sent`);
           }
         } else {
           console.warn(
             `⚠️ No actions returned from pipeline. Pipeline result: ${JSON.stringify(pipelineResult)}`
           );
+          console.log(`⚠️ Sending error update because no actions were found...`);
           await this.sendOperationUpdate(
             'error',
             '',
             `I was unable to understand how to make the requested changes. Please try rephrasing your request.`,
             'error'
           );
+          console.log(`⚠️ Error update sent for no actions`);
         }
 
         console.log(`✅ Successfully processed modification request`);
@@ -215,22 +239,35 @@ export class Agent {
       const editedFiles = actions.filter(a => a.action === 'editFile').map(a => a.filePath);
       const deletedFiles = actions.filter(a => a.action === 'deleteFile').map(a => a.filePath);
 
-      // Create a summary message
-      const summary = [
-        "I've completed the requested changes:",
-        createdFiles.length > 0
-          ? `\n📄 Created ${createdFiles.length} files:\n${createdFiles.map(f => `- ${f}`).join('\n')}`
-          : '',
-        editedFiles.length > 0
-          ? `\n✏️ Modified ${editedFiles.length} files:\n${editedFiles.map(f => `- ${f}`).join('\n')}`
-          : '',
-        deletedFiles.length > 0
-          ? `\n🗑️ Deleted ${deletedFiles.length} files:\n${deletedFiles.map(f => `- ${f}`).join('\n')}`
-          : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
+      // Create prompt for AI to summarize changes
+      const summaryPrompt = `
+      I've made the following changes to the project:
+      
+      ${createdFiles.length > 0 ? `Created files:\n${createdFiles.map(f => `- ${f}`).join('\n')}\n` : ''}
+      ${editedFiles.length > 0 ? `Modified files:\n${editedFiles.map(f => `- ${f}`).join('\n')}\n` : ''}
+      ${deletedFiles.length > 0 ? `Deleted files:\n${deletedFiles.map(f => `- ${f}`).join('\n')}\n` : ''}
+      
+      Please provide a concise summary of the changes made. Plain text, no markdown.
+      `;
 
+      console.log('Generating AI summary for changes with prompt:', summaryPrompt);
+
+      // Use the AI to generate a summary
+      const summaryResponse = await generateAICompletion(
+        [{ role: 'user', content: summaryPrompt }],
+        {
+          timeoutMs: 30000,
+          maxTokens: 500,
+        }
+      );
+
+      // Extract the summary text
+      const summary =
+        typeof summaryResponse === 'object' && 'text' in summaryResponse
+          ? summaryResponse.text
+          : String(summaryResponse);
+
+      console.log('AI generated summary:', summary);
       return summary;
     } catch (error) {
       console.error('Error generating changes summary:', error);
@@ -248,6 +285,10 @@ export class Agent {
     status: 'pending' | 'completed' | 'error' = 'completed'
   ) {
     try {
+      console.log(
+        `📝 Sending operation update: ${operationType} ${filePath} (${status}): ${operationMessage.substring(0, 50)}...`
+      );
+
       // Find the most recent assistant message to update instead of creating a new one
       const existingMessages = await db
         .select()
@@ -275,6 +316,7 @@ export class Agent {
         console.log(`✅ Using existing assistant message: ${messageId} for operation`);
       } else {
         // Create a new message for the operation update
+        console.log(`📝 Creating new message for operation update...`);
         const [newMessage] = await db
           .insert(chatMessages)
           .values({
@@ -297,20 +339,28 @@ export class Agent {
       }
 
       // Add the operation to actions table
-      const [] = await db
-        .insert(actions)
-        .values({
-          messageId: messageId,
-          type: dbOperationType,
-          path: filePath,
-          status,
-          timestamp: new Date(),
-        })
-        .returning();
-
       console.log(
-        `✅ Action saved: ${operationType} ${filePath} for message ${messageId} with status ${status}`
+        `📝 Inserting action into database: messageId=${messageId}, type=${dbOperationType}, path=${filePath}, status=${status}`
       );
+      try {
+        const [insertedAction] = await db
+          .insert(actions)
+          .values({
+            messageId: messageId,
+            type: dbOperationType,
+            path: filePath,
+            status,
+            timestamp: new Date(),
+          })
+          .returning();
+
+        console.log(
+          `✅ Action saved: ${operationType} ${filePath} for message ${messageId} with status ${status}`
+        );
+        console.log(`✅ Inserted action: ${JSON.stringify(insertedAction)}`);
+      } catch (dbError) {
+        console.error(`❌ Error inserting action into database:`, dbError);
+      }
 
       // Revalidate the path to update the UI
       revalidatePath(`/projects/${this.projectId}`);
@@ -330,13 +380,22 @@ export class Agent {
    */
   async executeAction(action: Action): Promise<boolean> {
     console.log(`🔧 Executing action: ${action.action} on ${action.filePath}`);
+    console.log(`🔧 Action details: ${JSON.stringify(action, null, 2)}`);
 
     try {
+      // Normalize the action to ensure compatibility
+      const normalizedAction = normalizeAction(action);
+      console.log(`🔧 Normalized action: ${JSON.stringify(normalizedAction, null, 2)}`);
+
       // Get the appropriate tool
-      const tool = getTool(action.action);
+      // The tool name should match exactly what's in the tools array
+      const toolName = normalizedAction.action;
+      console.log(`🔧 Looking for tool with name: ${toolName}`);
+
+      const tool = getTool(toolName);
 
       if (!tool) {
-        console.error(`❌ Unknown action: ${action.action}`);
+        console.error(`❌ Unknown action: ${action.action}, normalized to: ${toolName}`);
         await this.sendOperationUpdate(
           'error',
           action.filePath,
@@ -348,25 +407,28 @@ export class Agent {
 
       // Map action type to operation type
       const operationType =
-        action.action === 'createFile'
+        normalizedAction.action === 'createFile'
           ? 'create'
-          : action.action === 'createDirectory'
+          : normalizedAction.action === 'createDirectory'
             ? 'createDir'
-            : action.action === 'editFile'
+            : normalizedAction.action === 'editFile'
               ? 'edit'
-              : action.action === 'deleteFile'
+              : normalizedAction.action === 'deleteFile'
                 ? 'delete'
-                : action.action === 'removeDirectory'
+                : normalizedAction.action === 'removeDirectory'
                   ? 'removeDir'
-                  : action.action === 'search' || action.action === 'Read'
+                  : normalizedAction.action === 'search' || normalizedAction.action === 'Read'
                     ? 'read'
                     : 'error';
 
       // Send an update about the operation we're about to perform with pending status
+      console.log(
+        `📝 Sending operation update for ${operationType} ${normalizedAction.filePath} (pending)...`
+      );
       const result = await this.sendOperationUpdate(
         operationType,
-        action.filePath,
-        action.message,
+        normalizedAction.filePath,
+        normalizedAction.message,
         'pending'
       );
 
@@ -376,38 +438,44 @@ export class Agent {
       }
 
       const messageId = result.message.id;
+      console.log(`✅ Created operation message with ID: ${messageId}`);
 
       // Execute the tool with the appropriate parameters
       try {
-        switch (action.action) {
+        switch (normalizedAction.action) {
           case 'editFile':
           case 'createFile': {
-            if (!action.content) {
-              console.error(`❌ Missing content for ${action.action} action`);
+            if (!normalizedAction.content) {
+              console.error(`❌ Missing content for ${normalizedAction.action} action`);
               await this.sendOperationUpdate(
                 'error',
-                action.filePath,
-                `Error: Missing content for ${action.action} action on ${action.filePath}`,
+                normalizedAction.filePath,
+                `Error: Missing content for ${normalizedAction.action} action on ${normalizedAction.filePath}`,
                 'error'
               );
               return false;
             }
             // Construct full path for file operations
-            const fullPath = path.join(getProjectPath(this.projectId), action.filePath);
-            const success = await tool.execute(fullPath, action.content);
+            const fullPath = path.join(getProjectPath(this.projectId), normalizedAction.filePath);
+            console.log(`📝 Executing ${normalizedAction.action} on full path: ${fullPath}`);
+            console.log(`📝 Content length: ${normalizedAction.content.length} characters`);
+            const success = await tool.execute(fullPath, normalizedAction.content);
 
             if (!success) {
-              console.error(`❌ Failed to ${action.action} file: ${action.filePath}`);
+              console.error(
+                `❌ Failed to ${normalizedAction.action} file: ${normalizedAction.filePath}`
+              );
               await this.sendOperationUpdate(
                 'error',
-                action.filePath,
-                `Error: Failed to ${action.action} file ${action.filePath}`,
+                normalizedAction.filePath,
+                `Error: Failed to ${normalizedAction.action} file ${normalizedAction.filePath}`,
                 'error'
               );
               return false;
             }
 
             // Update operation status to completed after successful execution
+            console.log(`📝 Updating action status to completed in database...`);
             await db
               .update(actions)
               .set({
@@ -417,7 +485,7 @@ export class Agent {
               .where(
                 and(
                   eq(actions.messageId, messageId),
-                  eq(actions.path, action.filePath),
+                  eq(actions.path, normalizedAction.filePath),
                   eq(
                     actions.type,
                     operationType === 'createDir' || operationType === 'removeDir'
@@ -430,30 +498,32 @@ export class Agent {
               );
 
             console.log(
-              `✅ Updated operation status to completed: ${operationType} ${action.filePath}`
+              `✅ Updated operation status to completed: ${operationType} ${normalizedAction.filePath}`
             );
             break;
           }
           case 'deleteFile':
           case 'removeDirectory': {
             // Construct full path for file operations
-            const deletePath = path.join(getProjectPath(this.projectId), action.filePath);
+            const deletePath = path.join(getProjectPath(this.projectId), normalizedAction.filePath);
+            console.log(`📝 Executing ${normalizedAction.action} on full path: ${deletePath}`);
             const success = await tool.execute(deletePath);
 
             if (!success) {
               console.error(
-                `❌ Failed to ${action.action === 'deleteFile' ? 'delete file' : 'remove directory'}: ${action.filePath}`
+                `❌ Failed to ${normalizedAction.action === 'deleteFile' ? 'delete file' : 'remove directory'}: ${normalizedAction.filePath}`
               );
               await this.sendOperationUpdate(
                 'error',
-                action.filePath,
-                `Error: Failed to ${action.action === 'deleteFile' ? 'delete file' : 'remove directory'} ${action.filePath}`,
+                normalizedAction.filePath,
+                `Error: Failed to ${normalizedAction.action === 'deleteFile' ? 'delete file' : 'remove directory'} ${normalizedAction.filePath}`,
                 'error'
               );
               return false;
             }
 
             // Update operation status to completed after successful execution
+            console.log(`📝 Updating action status to completed in database...`);
             await db
               .update(actions)
               .set({
@@ -463,7 +533,7 @@ export class Agent {
               .where(
                 and(
                   eq(actions.messageId, messageId),
-                  eq(actions.path, action.filePath),
+                  eq(actions.path, normalizedAction.filePath),
                   eq(
                     actions.type,
                     operationType === 'createDir' || operationType === 'removeDir'
@@ -476,27 +546,29 @@ export class Agent {
               );
 
             console.log(
-              `✅ Updated operation status to completed: ${operationType} ${action.filePath}`
+              `✅ Updated operation status to completed: ${operationType} ${normalizedAction.filePath}`
             );
             break;
           }
           case 'createDirectory': {
             // Construct full path for directory operations
-            const dirPath = path.join(getProjectPath(this.projectId), action.filePath);
+            const dirPath = path.join(getProjectPath(this.projectId), normalizedAction.filePath);
+            console.log(`📝 Executing ${normalizedAction.action} on full path: ${dirPath}`);
             const success = await tool.execute(dirPath);
 
             if (!success) {
-              console.error(`❌ Failed to create directory: ${action.filePath}`);
+              console.error(`❌ Failed to create directory: ${normalizedAction.filePath}`);
               await this.sendOperationUpdate(
                 'error',
-                action.filePath,
-                `Error: Failed to create directory ${action.filePath}`,
+                normalizedAction.filePath,
+                `Error: Failed to create directory ${normalizedAction.filePath}`,
                 'error'
               );
               return false;
             }
 
             // Update operation status to completed after successful execution
+            console.log(`📝 Updating action status to completed in database...`);
             await db
               .update(actions)
               .set({
@@ -506,7 +578,7 @@ export class Agent {
               .where(
                 and(
                   eq(actions.messageId, messageId),
-                  eq(actions.path, action.filePath),
+                  eq(actions.path, normalizedAction.filePath),
                   eq(
                     actions.type,
                     operationType === 'createDir' || operationType === 'removeDir'
@@ -519,15 +591,17 @@ export class Agent {
               );
 
             console.log(
-              `✅ Updated operation status to completed: ${operationType} ${action.filePath}`
+              `✅ Updated operation status to completed: ${operationType} ${normalizedAction.filePath}`
             );
             break;
           }
           case 'search': {
             // Execute the search
-            await tool.execute(action.filePath);
+            console.log(`📝 Executing search for: ${normalizedAction.filePath}`);
+            await tool.execute(normalizedAction.filePath);
 
             // Update operation status to completed after successful execution
+            console.log(`📝 Updating action status to completed in database...`);
             await db
               .update(actions)
               .set({
@@ -537,7 +611,7 @@ export class Agent {
               .where(
                 and(
                   eq(actions.messageId, messageId),
-                  eq(actions.path, action.filePath),
+                  eq(actions.path, normalizedAction.filePath),
                   eq(
                     actions.type,
                     operationType === 'createDir' || operationType === 'removeDir'
@@ -550,16 +624,18 @@ export class Agent {
               );
 
             console.log(
-              `✅ Updated operation status to completed: ${operationType} ${action.filePath}`
+              `✅ Updated operation status to completed: ${operationType} ${normalizedAction.filePath}`
             );
             break;
           }
           case 'Read': {
             // Construct full path for file operations
-            const fullPath = path.join(getProjectPath(this.projectId), action.filePath);
+            const fullPath = path.join(getProjectPath(this.projectId), normalizedAction.filePath);
+            console.log(`📝 Executing read on full path: ${fullPath}`);
             await tool.execute(fullPath);
 
             // Update operation status to completed after successful execution
+            console.log(`📝 Updating action status to completed in database...`);
             await db
               .update(actions)
               .set({
@@ -569,7 +645,7 @@ export class Agent {
               .where(
                 and(
                   eq(actions.messageId, messageId),
-                  eq(actions.path, action.filePath),
+                  eq(actions.path, normalizedAction.filePath),
                   eq(
                     actions.type,
                     operationType === 'createDir' || operationType === 'removeDir'
@@ -582,16 +658,16 @@ export class Agent {
               );
 
             console.log(
-              `✅ Updated operation status to completed: ${operationType} ${action.filePath}`
+              `✅ Updated operation status to completed: ${operationType} ${normalizedAction.filePath}`
             );
             break;
           }
           default:
-            console.error(`❌ Unsupported action: ${action.action}`);
+            console.error(`❌ Unsupported action: ${normalizedAction.action}`);
             await this.sendOperationUpdate(
               'error',
-              action.filePath,
-              `Error: Unsupported action '${action.action}'`,
+              normalizedAction.filePath,
+              `Error: Unsupported action '${normalizedAction.action}'`,
               'error'
             );
             return false;
@@ -601,6 +677,7 @@ export class Agent {
       } catch (error) {
         console.error(`❌ Error executing action:`, error);
         // Update the operation status to error
+        console.log(`📝 Updating action status to error in database...`);
         await db
           .update(actions)
           .set({
@@ -610,7 +687,7 @@ export class Agent {
           .where(
             and(
               eq(actions.messageId, messageId),
-              eq(actions.path, action.filePath),
+              eq(actions.path, normalizedAction.filePath),
               eq(
                 actions.type,
                 operationType === 'createDir' || operationType === 'removeDir'
@@ -624,8 +701,8 @@ export class Agent {
 
         await this.sendOperationUpdate(
           'error',
-          action.filePath,
-          `Error: Failed to ${action.action} on ${action.filePath}: ${(error as Error).message}`,
+          normalizedAction.filePath,
+          `Error: Failed to ${normalizedAction.action} on ${normalizedAction.filePath}: ${(error as Error).message}`,
           'error'
         );
         return false;
@@ -641,38 +718,4 @@ export class Agent {
       return false;
     }
   }
-}
-
-/**
- * Process a project modification request using the agent (legacy function for backward compatibility)
- */
-export async function processProjectModification(
-  projectId: number,
-  prompt: string,
-  pipelineType: PipelineType = PipelineType.NAIVE
-) {
-  const agent = new Agent(projectId, pipelineType);
-  return agent.run(prompt);
-}
-
-/**
- * Legacy function for backward compatibility
- */
-export async function sendOperationUpdate(
-  projectId: number,
-  operationType: 'create' | 'edit' | 'delete' | 'error' | 'read' | 'createDir' | 'removeDir',
-  filePath: string,
-  operationMessage: string,
-  status: 'pending' | 'completed' | 'error' = 'completed'
-) {
-  const agent = new Agent(projectId);
-  return agent.sendOperationUpdate(operationType, filePath, operationMessage, status);
-}
-
-/**
- * Legacy function for backward compatibility
- */
-export async function executeAction(projectId: number, action: Action): Promise<boolean> {
-  const agent = new Agent(projectId);
-  return agent.executeAction(action);
 }

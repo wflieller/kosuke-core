@@ -6,6 +6,8 @@ Today the first open-source vibe-coding platform, tomorrow the next geneation "I
 
 ### Running Locally
 
+> Make sure to check the Stripe Integration section before running these commands. As of now, you need to provide all the Stripe keys in order to have the commands running smoothly.
+
 ```bash
 # run postgres and minio
 cp .env.example .env
@@ -33,12 +35,10 @@ npm run dev
 
 ### Docker Preview Setup
 
-For project previews, we use Docker containers to isolate and run Next.js applications. You need to clone the repo and build the base image:
+For project previews, we use Docker containers to isolate and run Next.js applications. You need to make sure to have docker installed and pull the right image:
 
 ```bash
-git clone https://github.com/filopedraz/kosuke-template.git
-cd ./kosuke-template
-docker build -t filopedrazzini/kosuke-nextjs:v0.0.2 .
+docker pull filopedrazzini/kosuke-template:v0.0.2
 ```
 
 This image will be used for all project previews, providing consistent development environments for your generated applications.
@@ -77,7 +77,7 @@ This configures a Git pre-commit hook that runs linting and prevents commits wit
 git commit -m "Your message" --no-verify
 ```
 
-## 🎯 Roadmap
+## 🎯 Roadmap (Thinking...)
 
 - [ ] **Database and backend support**: build full-stack web applications, not only static pages.
 - [ ] **Brand Guidelines Generator**: include in the pipeline a step related to Font and color palette generation based on the project description.

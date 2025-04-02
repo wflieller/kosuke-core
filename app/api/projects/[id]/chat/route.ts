@@ -5,20 +5,26 @@ import { z } from 'zod';
 import { getSession } from '@/lib/auth/session';
 import { db } from '@/lib/db/drizzle';
 import { getProjectById } from '@/lib/db/projects';
-import { chatMessages, actions, users, Action } from '@/lib/db/schema';
+import { chatMessages, actions, Action } from '@/lib/db/schema';
 import { LLM } from '@/lib/constants';
 import { uploadFile } from '@/lib/storage';
-import { getPipeline, PipelineType } from '@/lib/llm/pipelines';
+import { PipelineType } from '@/lib/llm/pipelines/types';
 import { hasReachedMessageLimit } from '@/lib/models';
+import { Agent } from '@/lib/llm/core/agent';
 
-// Schema for sending a message
-const sendMessageSchema = z.object({
-  content: z.string(),
-  contextFiles: z.array(z.object({
-    name: z.string(),
+// Schema for sending a message - support both formats
+const sendMessageSchema = z.union([
+  z.object({
+    message: z.object({
+      content: z.string(),
+      pipelineType: z.enum(['naive', 'roo_code']).optional(),
+    }),
+  }),
+  z.object({
     content: z.string(),
-  })).optional(),
-});
+    pipelineType: z.enum(['naive', 'roo_code']).optional(),
+  })
+]);
 
 /**
  * Get chat history for a project
@@ -56,7 +62,9 @@ async function saveUploadedImage(file: File, projectId: number): Promise<string>
 
 /**
  * Process a FormData request and extract the content and image
+ * @deprecated This function may be used elsewhere in the codebase
  */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 async function processFormDataRequest(req: NextRequest, projectId: number): Promise<{ 
   content: string; 
   includeContext: boolean; 
@@ -84,6 +92,7 @@ async function processFormDataRequest(req: NextRequest, projectId: number): Prom
     imageUrl
   };
 }
+/* eslint-enable @typescript-eslint/no-unused-vars */
 
 /**
  * GET /api/projects/[id]/chat
@@ -103,6 +112,7 @@ export async function GET(
       );
     }
 
+    // Await params to get the id
     const { id } = await params;
     const projectId = Number(id);
     if (isNaN(projectId)) {
@@ -204,14 +214,9 @@ export async function GET(
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
-) {
+): Promise<NextResponse> {
   try {
-    const { id } = await params;
-    const projectId = Number(id);
-    
-    console.log(`📋 Processing chat message for project ID: ${projectId}`);
-    
-    // Get the session to check user
+    // Get the session
     const session = await getSession();
     if (!session) {
       return NextResponse.json(
@@ -219,7 +224,11 @@ export async function POST(
         { status: 401 }
       );
     }
-    
+
+    // Await params to get the id
+    const { id } = await params;
+    const projectId = parseInt(id);
+
     // Check if the user has reached their message limit
     try {
       const limitReached = await hasReachedMessageLimit(session.user.id);
@@ -237,118 +246,77 @@ export async function POST(
       // Other errors
       console.error('Error checking message limit:', error);
     }
+
+    // Parse and validate the request body
+    const body = await req.json();
+    console.log('Request body:', JSON.stringify(body));
     
-    // Check content type to determine how to parse the request
-    const contentType = req.headers.get('content-type') || '';
-    let content = '';
-    let imageUrl: string | undefined;
+    const parseResult = sendMessageSchema.safeParse(body);
     
-    if (contentType.includes('multipart/form-data')) {
-      // Process form data with possible image upload
-      const result = await processFormDataRequest(req, projectId);
-      content = result.content;
-      imageUrl = result.imageUrl;
+    if (!parseResult.success) {
+      console.error('Invalid request format:', parseResult.error);
+      return NextResponse.json(
+        { error: 'Invalid request format', details: parseResult.error.format() },
+        { status: 400 }
+      );
+    }
+    
+    // Extract content and pipelineType based on the format received
+    let messageContent: string;
+    let rawPipelineType: string | undefined;
+    
+    if ('message' in parseResult.data) {
+      // Format: { message: { content, pipelineType } }
+      messageContent = parseResult.data.message.content;
+      rawPipelineType = parseResult.data.message.pipelineType;
     } else {
-      // Process JSON request
-      const body = await req.json();
-      const parseResult = sendMessageSchema.safeParse(body);
-      
-      if (!parseResult.success) {
-        console.error('❌ Invalid request body:', parseResult.error);
-        return NextResponse.json(
-          { error: 'Invalid request body', details: parseResult.error },
-          { status: 400 }
-        );
-      }
-      
-      content = parseResult.data.content;
+      // Format: { content, pipelineType }
+      messageContent = parseResult.data.content;
+      rawPipelineType = parseResult.data.pipelineType;
     }
     
-    // Add image URL to content if present
-    const messageContent = imageUrl 
-      ? `${content}\n\n[Attached Image](${imageUrl})`
-      : content;
-    
-    console.log(`📝 Received message: "${messageContent.substring(0, 50)}${messageContent.length > 50 ? '...' : ''}"`);
-    
-    // Save the user message to the database
-    const [userMessage] = await db.insert(chatMessages).values({
-      projectId,
-      userId: session.user.id,
-      role: 'user',
-      content: messageContent,
-      modelType: 'premium',
-    }).returning();
-    
-    console.log('✅ User message saved:', userMessage.id);
-    
-    // Create a placeholder message for the assistant response
-    const [assistantMessage] = await db.insert(chatMessages).values({
-      projectId,
-      role: 'assistant',
-      content: "I'm analyzing your request...",
-      modelType: 'premium',
-    }).returning();
-    
-    console.log('✅ Placeholder assistant message created:', assistantMessage.id);
-    
-    // Process the request with the agent
-    console.log('🤖 Processing request with pipeline');
-    
-    // Get the user's pipeline preference
-    const userId = req.headers.get('User-Id');
-    let pipelinePreference = 'naive'; // Default to naive pipeline
-    
-    if (userId) {
-      const [userRecord] = await db.select()
-        .from(users)
-        .where(eq(users.id, parseInt(userId)));
-      
-      if (userRecord?.pipelinePreference) {
-        pipelinePreference = userRecord.pipelinePreference;
-      }
-    }
-    
-    // Convert the preference string to the enum
+    // Map string pipeline type to enum
     let pipelineType: PipelineType;
-    switch (pipelinePreference) {
+    switch (rawPipelineType) {
       case 'roo_code':
         pipelineType = PipelineType.ROO_CODE;
         break;
+      case 'naive':
       default:
         pipelineType = PipelineType.NAIVE;
     }
-    
-    // Get the appropriate pipeline and process the message
-    const pipeline = getPipeline(pipelineType);
-    const result = await pipeline.processPrompt(projectId, messageContent);
-    
-    // Check if processing was successful
-    if (!result.success) {
-      console.error('❌ Agent processing failed:', result.error);
-      
-      // If the agent failed, update the assistant message with an error
-      await db.update(chatMessages)
-        .set({
-          content: `I encountered an error while processing your request: ${result.error || 'Unknown error'}`,
-          timestamp: new Date(),
-        })
-        .where(eq(chatMessages.id, assistantMessage.id));
-    }
-    
-    // Get the updated assistant message to return to the client
-    const [updatedMessage] = await db.select()
-      .from(chatMessages)
-      .where(eq(chatMessages.id, assistantMessage.id));
-    
-    return NextResponse.json({
-      message: updatedMessage,
-      success: result.success
+
+    console.log(`Received message content: "${messageContent.substring(0, 50)}${messageContent.length > 50 ? '...' : ''}"`);
+    console.log(`Using pipeline type: ${pipelineType}`);
+
+    // Save the user message to the database
+    await db.insert(chatMessages).values({
+      projectId,
+      userId: session.user.id,
+      content: messageContent,
+      role: 'user',
+      modelType: 'premium',
     });
+
+    console.log(`Processing request with Agent class for project ${projectId}`);
+    
+    // Create an Agent instance and run it with the message content
+    const agent = new Agent(projectId, pipelineType);
+    const agentResult = await agent.run(messageContent);
+
+    if (!agentResult.success) {
+      console.error('Error processing request:', agentResult.error);
+      return NextResponse.json(
+        { message: 'Error processing request', error: agentResult.error },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error processing chat message:', error);
+    console.error('Error processing chat:', error);
     return NextResponse.json(
-      { error: 'Failed to process chat message' },
+      { message: 'Error processing request', error: String(error) },
       { status: 500 }
     );
   }

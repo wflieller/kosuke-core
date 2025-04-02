@@ -3,7 +3,7 @@ import { getProjectContext } from '../utils/context';
 import { buildNaivePrompt } from '../prompts/naive';
 import { Pipeline } from './types';
 import { CONTEXT } from '@/lib/constants';
-import { Action } from '../core/types';
+import { Action, isValidAction, normalizeAction } from '../core/types';
 
 /**
  * Implementation of the naive pipeline which processes project modifications
@@ -87,38 +87,104 @@ function parseActionsFromResponse(
       cleanedResponse = cleanedResponse.replace(/```json\s*/, '').replace(/```\s*$/, '');
     }
 
+    console.log('📝 Raw response:', responseText.substring(0, 200) + '...');
     console.log('📝 Cleaned response:', cleanedResponse.substring(0, 200) + '...');
 
     // First, try to parse the entire response as JSON
     try {
-      return JSON.parse(cleanedResponse) as Action[];
+      const parsedActions = JSON.parse(cleanedResponse) as Action[];
+      console.log(`✅ Successfully parsed JSON: ${parsedActions.length} actions found`);
+
+      // Verify action structure
+      if (Array.isArray(parsedActions)) {
+        console.log(`✅ Parsed result is an array with ${parsedActions.length} items`);
+
+        // Validate and normalize each action
+        const validActions: Action[] = [];
+
+        parsedActions.forEach((action, index) => {
+          console.log(
+            `Action ${index + 1}:`,
+            JSON.stringify({
+              action: action.action,
+              filePath: action.filePath,
+              hasContent: !!action.content,
+              contentLength: action.content ? action.content.length : 0,
+              hasMessage: !!action.message,
+              messageLength: action.message ? action.message.length : 0,
+            })
+          );
+
+          if (isValidAction(action)) {
+            const normalizedAction = normalizeAction(action);
+            console.log(
+              `✅ Action ${index + 1} is valid and normalized:`,
+              JSON.stringify({
+                action: normalizedAction.action,
+                filePath: normalizedAction.filePath,
+              })
+            );
+            validActions.push(normalizedAction);
+          } else {
+            console.error(`❌ Action ${index + 1} is invalid:`, JSON.stringify(action));
+          }
+        });
+
+        console.log(`✅ Validated ${validActions.length} out of ${parsedActions.length} actions`);
+        return validActions;
+      } else {
+        console.error('❌ Parsed result is not an array:', typeof parsedActions);
+        return [];
+      }
     } catch (error) {
       console.error('❌ Error parsing actions from cleaned response:', error);
+      console.error('❌ First 500 chars of cleaned response:', cleanedResponse.substring(0, 500));
+
       // If that fails, try to extract JSON from the response
       const jsonRegex = /\[\s*\{.*\}\s*\]/s;
       const match = cleanedResponse.match(jsonRegex);
 
       if (match && match[0]) {
-        return JSON.parse(match[0]) as Action[];
+        console.log(`✅ Found JSON array with regex: ${match[0].substring(0, 100)}...`);
+        try {
+          const parsedActions = JSON.parse(match[0]) as Action[];
+          console.log(
+            `✅ Successfully parsed regex-extracted JSON: ${parsedActions.length} actions found`
+          );
+          return parsedActions;
+        } catch (regexParseError) {
+          console.error('❌ Error parsing regex-extracted JSON:', regexParseError);
+        }
+      } else {
+        console.error('❌ No JSON array found with regex');
       }
 
       // If still no valid JSON, look for action blocks
       const actionBlocks = cleanedResponse.match(/\{\s*"action":[^}]+\}/g);
       if (actionBlocks && actionBlocks.length > 0) {
+        console.log(`✅ Found ${actionBlocks.length} individual action blocks`);
         // Try to parse each block and combine them
         const actions: Action[] = [];
         for (const block of actionBlocks) {
           try {
+            console.log(`Parsing action block: ${block.substring(0, 100)}...`);
             const action = JSON.parse(block) as Action;
+            console.log(
+              `✅ Successfully parsed action block: ${action.action} on ${action.filePath}`
+            );
             actions.push(action);
           } catch (e) {
             console.error('❌ Error parsing action block:', e);
+            console.error('❌ Action block content:', block);
           }
         }
 
         if (actions.length > 0) {
+          console.log(`✅ Successfully parsed ${actions.length} individual action blocks`);
           return actions;
         }
+      } else {
+        console.error('❌ No individual action blocks found');
       }
 
       // If all parsing attempts fail, return an empty array
