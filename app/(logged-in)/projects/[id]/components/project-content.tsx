@@ -2,10 +2,10 @@
 
 import { useState, useEffect } from 'react';
 
-import ChatInterface from '@/components/projects/ChatInterface';
-import CodeExplorer from '@/components/projects/CodeExplorer';
-import PreviewPanel from '@/components/projects/PreviewPanel';
-import ProjectLayout from '@/components/projects/ProjectLayout';
+import ChatInterface from './chat-interface';
+import CodeExplorer from './code-explorer';
+import PreviewPanel from './preview-panel';
+import ProjectLayout from './project-layout';
 import Navbar from '@/components/ui/navbar';
 import { useProjectStore, type Project } from '@/lib/stores/projectStore';
 
