@@ -15,13 +15,16 @@ export function useProjects({ userId, initialData }: UseProjectsOptions) {
     queryKey: ['projects', userId],
     queryFn: async () => {
       try {
-        // In a real implementation, this would be an API call
+        // Make the API call
         const response = await fetch(`/api/projects?userId=${userId}`);
         if (!response.ok) {
           throw new Error('Failed to fetch projects');
         }
-        const data = await response.json();
-        const projects = data.projects || initialData || [];
+
+        // The data is returned directly as an array, not as { projects: [] }
+        const projects = await response.json();
+
+        // Update the global store
         setProjects(projects);
         return projects;
       } catch (error) {
@@ -32,6 +35,8 @@ export function useProjects({ userId, initialData }: UseProjectsOptions) {
     },
     placeholderData: initialData,
     staleTime: 1000 * 60, // Consider data stale after 1 minute
+    refetchOnWindowFocus: true, // Refetch when window gets focus
+    refetchOnMount: true, // Always refetch when component mounts
   });
 }
 
@@ -90,17 +95,99 @@ export function useDeleteProject() {
 
   return useMutation<number, Error, number>({
     mutationFn: async projectId => {
+      // Allow more time for deletion to complete
+      const timeoutDuration = 30000; // 30 seconds
+
+      // Track stages to ensure a proper UX
+      console.log('Starting project deletion process...');
+
+      // First, try to delete the project folder with a timeout
+      try {
+        console.log('Step 1: Deleting project folder...');
+        const fileDeletePromise = new Promise<boolean>(async resolve => {
+          try {
+            const folderResponse = await fetch(`/api/projects/${projectId}/files`, {
+              method: 'DELETE',
+            });
+
+            if (folderResponse.ok) {
+              console.log('File deletion API call succeeded');
+              resolve(true);
+            } else {
+              console.error('Error from file deletion API:', await folderResponse.text());
+              resolve(false);
+            }
+          } catch (error) {
+            console.error('Error calling file deletion API:', error);
+            resolve(false);
+          }
+        });
+
+        // Add a timeout to ensure we don't wait indefinitely
+        const timeoutPromise = new Promise<boolean>(resolve => {
+          setTimeout(() => {
+            console.log('File deletion timed out, proceeding with project deletion');
+            resolve(false);
+          }, timeoutDuration);
+        });
+
+        // Use Promise.race to either get the result or timeout
+        await Promise.race([fileDeletePromise, timeoutPromise]);
+      } catch (error) {
+        console.error('Error during file deletion process:', error);
+      }
+
+      // Ensure at least 2 seconds pass for UI feedback on faster operations
+      const startTime = Date.now();
+      const minOperationTime = 2000; // 2 seconds minimum operation time
+
+      console.log('Step 2: Deleting project from database...');
+      // Always proceed with project deletion even if file deletion failed
       const response = await fetch(`/api/projects/${projectId}`, {
         method: 'DELETE',
       });
+
       if (!response.ok) {
         throw new Error('Failed to delete project');
       }
+
+      // Ensure the operation takes at least minOperationTime for better UX
+      const operationTime = Date.now() - startTime;
+      if (operationTime < minOperationTime) {
+        await new Promise(resolve => setTimeout(resolve, minOperationTime - operationTime));
+      }
+
+      console.log('Project deletion completed successfully');
       return projectId;
     },
     onSuccess: projectId => {
+      // First update the store
       removeProject(projectId);
-      queryClient.invalidateQueries({ queryKey: ['projects'] });
+
+      console.log('Project removed from store, invalidating queries...');
+
+      // Invalidate all relevant queries with proper scope
+      queryClient.invalidateQueries({
+        queryKey: ['projects'],
+        // Force a refetch right away
+        refetchType: 'active',
+      });
+
+      // Invalidate specific project-related queries
+      queryClient.invalidateQueries({
+        queryKey: ['files', projectId],
+      });
+
+      queryClient.invalidateQueries({
+        queryKey: ['project', projectId],
+      });
+
+      // Give the UI time to update before refetching
+      setTimeout(() => {
+        queryClient.refetchQueries({
+          queryKey: ['projects'],
+        });
+      }, 300);
     },
   });
 }
