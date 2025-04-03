@@ -1,6 +1,6 @@
 'use client';
 
-import { ArrowUp, Loader2, Paperclip, X } from 'lucide-react';
+import { ArrowUp, Loader2, Paperclip, X, Image as ImageIcon } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import Image from 'next/image';
 
@@ -30,8 +30,10 @@ export default function ChatInput({
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [includeContext, setIncludeContext] = useState(false);
   const [attachedImage, setAttachedImage] = useState<AttachedImage | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
   // Auto-resize textarea based on content
   useEffect(() => {
@@ -52,6 +54,7 @@ export default function ChatInput({
             if (file) {
               handleImageAttach(file);
               e.preventDefault();
+              console.log('Image pasted from clipboard');
               break;
             }
           }
@@ -61,6 +64,48 @@ export default function ChatInput({
 
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
+  }, []);
+
+  // Add drag and drop support for images
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) return;
+
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDraggingOver(true);
+    };
+
+    const handleDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDraggingOver(false);
+    };
+
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setIsDraggingOver(false);
+      
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        const file = e.dataTransfer.files[0];
+        if (file.type.startsWith('image/')) {
+          handleImageAttach(file);
+          console.log('Image dropped into chat input');
+        }
+      }
+    };
+
+    form.addEventListener('dragover', handleDragOver);
+    form.addEventListener('dragleave', handleDragLeave);
+    form.addEventListener('drop', handleDrop);
+
+    return () => {
+      form.removeEventListener('dragover', handleDragOver);
+      form.removeEventListener('dragleave', handleDragLeave);
+      form.removeEventListener('drop', handleDrop);
+    };
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -94,6 +139,13 @@ export default function ChatInput({
   };
 
   const handleImageAttach = (file: File) => {
+    // Check file size (max 5MB)
+    const maxSize = 5 * 1024 * 1024; // 5MB
+    if (file.size > maxSize) {
+      alert('Image is too large. Maximum size is 5MB.');
+      return;
+    }
+    
     const reader = new FileReader();
     reader.onload = (e) => {
       if (e.target?.result) {
@@ -122,8 +174,26 @@ export default function ChatInput({
   };
 
   return (
-    <form onSubmit={handleSubmit} className={cn('px-4 pb-0', className)}>
-      <div className="relative flex flex-col rounded-lg border border-border">
+    <form 
+      ref={formRef}
+      onSubmit={handleSubmit} 
+      className={cn('px-4 pb-0', className)}
+    >
+      <div 
+        className={cn(
+          "relative flex flex-col rounded-lg border border-border transition-colors", 
+          isDraggingOver && "border-primary border-dashed bg-primary/5"
+        )}
+      >
+        {isDraggingOver && (
+          <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10 pointer-events-none rounded-lg">
+            <div className="flex flex-col items-center text-primary">
+              <ImageIcon className="h-10 w-10 mb-2" />
+              <p className="text-sm font-medium">Drop image to attach</p>
+            </div>
+          </div>
+        )}
+        
         {attachedImage && (
           <div className="ml-3 mr-3 mt-2 p-1.5 flex items-center gap-2 bg-muted/50 rounded-md border border-border/30">
             <div className="relative w-8 h-8 border border-border/50 rounded bg-background flex items-center justify-center overflow-hidden">
@@ -184,7 +254,7 @@ export default function ChatInput({
               className="h-8 w-8"
               disabled={isLoading}
               onClick={() => fileInputRef.current?.click()}
-              title="Attach image"
+              title="Attach image (you can also paste or drag & drop)"
             >
               <Paperclip className="h-5 w-5" />
               <span className="sr-only">Attach image</span>

@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Loader2, ArrowUp, Paperclip } from 'lucide-react';
+import { Loader2, ArrowUp, Paperclip, Info } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import React, { useState, useEffect, useRef } from 'react';
 
@@ -21,7 +21,7 @@ const PROMPT_SUGGESTIONS = [
 interface ChatInputProps {
   onSendMessage?: (
     content: string,
-    options?: { includeContext?: boolean; contextFiles?: string[] }
+    options?: { includeContext?: boolean; contextFiles?: string[]; imageFile?: File }
   ) => Promise<void>;
   isLoading?: boolean;
   placeholder?: string;
@@ -38,8 +38,18 @@ export default function ChatInput({
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [showImageTooltip, setShowImageTooltip] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const router = useRouter();
+
+  // Toggle image tooltip on hover
+  const handlePaperclipHover = () => {
+    setShowImageTooltip(true);
+  };
+
+  const handlePaperclipLeave = () => {
+    setShowImageTooltip(false);
+  };
 
   // Auto-resize textarea based on content
   useEffect(() => {
@@ -142,17 +152,30 @@ export default function ChatInput({
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.5, delay: 0.5 }}
             >
-              <div>
+              <div className="relative">
                 <Button
                   type="button"
                   size="icon"
                   variant="outline"
                   className="h-10 w-10 rounded-md"
                   disabled={isLoadingState}
+                  onMouseEnter={handlePaperclipHover}
+                  onMouseLeave={handlePaperclipLeave}
                 >
                   <Paperclip className="h-5 w-5" />
                   <span className="sr-only">Attach file</span>
                 </Button>
+
+                {showImageTooltip && (
+                  <div className="absolute bottom-full mb-2 right-0 p-2 bg-popover text-popover-foreground rounded-md shadow-md text-xs w-48 border border-border">
+                    <div className="flex items-start gap-1.5">
+                      <Info className="h-3 w-3 mt-0.5 text-muted-foreground" />
+                      <span>
+                        Image uploads are only available within projects. Create a project first.
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
               <div>
                 <Button

@@ -194,15 +194,27 @@ export default function ChatInterface({
       // Snapshot the previous value
       const previousMessages = queryClient.getQueryData(['messages', projectId]);
       
+      // Create optimistic content that includes image information if present
+      let optimisticContent = newMessage.content;
+      const hasImage = !!newMessage.options?.imageFile;
+      
+      if (hasImage) {
+        const file = newMessage.options?.imageFile;
+        const fileInfo = file ? `${file.name} (${(file.size / 1024).toFixed(1)}KB)` : '';
+        optimisticContent = optimisticContent.trim() 
+          ? `${optimisticContent}\n\n[Uploading image: ${fileInfo}...]`
+          : `[Uploading image: ${fileInfo}...]`;
+      }
+      
       // Optimistically update to the new value
       queryClient.setQueryData(['messages', projectId], (old: ChatMessageProps[] = []) => [
         ...old,
         {
           id: Date.now(),
-          content: newMessage.content,
+          content: optimisticContent,
           role: 'user',
-                    timestamp: new Date(),
-                    isLoading: false,
+          timestamp: new Date(),
+          isLoading: false,
         },
         {
           id: Date.now() + 1,
@@ -274,16 +286,22 @@ export default function ChatInterface({
     setIsError(false);
     setErrorMessage('');
     
-    // Check if the message contains keywords for preview refresh
+    // Check if the message contains keywords for preview refresh or if it has an image
     if (content.toLowerCase().includes('update') || 
         content.toLowerCase().includes('change') || 
-        content.toLowerCase().includes('modify')) {
+        content.toLowerCase().includes('modify') ||
+        options?.imageFile) {
         const fileUpdatedEvent = new CustomEvent('file-updated', {
           detail: { projectId }
         });
         window.dispatchEvent(fileUpdatedEvent);
       }
       
+    // Log if we're sending an image
+    if (options?.imageFile) {
+      console.log(`Sending message with attached image: ${options.imageFile.name} (${(options.imageFile.size / 1024).toFixed(1)}KB)`);
+    }
+    
     // Send the message
     await mutate({ content, options });
   };

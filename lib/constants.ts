@@ -35,7 +35,7 @@ export const LLM = {
 // Preview
 export const PREVIEW = {
   CONTAINER_NAME_PREFIX: 'project-preview-',
-  DEFAULT_IMAGE: 'filopedrazzini/kosuke-nextjs:v0.0.3',
+  DEFAULT_IMAGE: process.env.PREVIEW_DEFAULT_IMAGE || 'ghcr.io/filopedraz/kosuke-template:latest',
   COMPILATION_TIMEOUT: 90000, // 90 seconds
   SERVER_RESPONSE_TIMEOUT: 10000, // 10 seconds
 };
