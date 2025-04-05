@@ -218,7 +218,7 @@ export default function ChatInterface({
         },
         {
           id: Date.now() + 1,
-          content: '',
+          content: 'Thinking...',
           role: 'assistant',
           timestamp: new Date(),
           isLoading: true,
@@ -327,13 +327,31 @@ export default function ChatInterface({
     return true;
   });
 
+  // Filter out "Thinking..." messages that are followed by another assistant message
+  const messagesWithoutThinking = filteredMessages.filter((message, index) => {
+    // Keep the message if it's not a "Thinking..." message from the assistant
+    if (message.role !== 'assistant' || message.content !== 'Thinking...') {
+      return true;
+    }
+    
+    // Check if this "Thinking..." message is followed by another assistant message
+    // If so, don't include it in the rendered messages
+    const nextMessage = filteredMessages[index + 1];
+    if (nextMessage && nextMessage.role === 'assistant') {
+      return false;
+    }
+    
+    // Keep "Thinking..." message if it's not followed by another assistant message
+    return true;
+  });
+
   // Enhance filtered messages with showAvatar property
-  const enhancedMessages = filteredMessages.map((message, index) => {
+  const enhancedMessages = messagesWithoutThinking.map((message, index) => {
     // Determine if we should show avatar based on the previous message
     let showAvatar = true;
     
     if (index > 0) {
-      const prevMessage = filteredMessages[index - 1];
+      const prevMessage = messagesWithoutThinking[index - 1];
       // Hide avatar if current message is from the same entity as previous message
       if (prevMessage.role === message.role) {
         showAvatar = false;
@@ -342,7 +360,7 @@ export default function ChatInterface({
     
     return {
       ...message,
-      showAvatar
+      showAvatar,
     };
   });
 
@@ -379,6 +397,15 @@ export default function ChatInterface({
               console.log('📨 New message received');
               // Invalidate and refetch messages when a new message arrives
               queryClient.invalidateQueries({ queryKey: ['messages', projectId] });
+              
+              // Dispatch custom event to refresh preview when assistant message is received
+              if (data.role === 'assistant') {
+                console.log('🔄 Assistant message received, triggering preview refresh');
+                const refreshPreviewEvent = new CustomEvent('refresh-preview', {
+                  detail: { projectId }
+                });
+                window.dispatchEvent(refreshPreviewEvent);
+              }
             } else if (data.type === 'file_updated') {
               console.log('📄 File updated event received');
               // Trigger file update event for UI

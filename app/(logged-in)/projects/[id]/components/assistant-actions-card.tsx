@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
-import { Loader2, FileIcon, Check, Search, FolderIcon, FolderPlusIcon, FolderMinusIcon } from 'lucide-react';
+import { Loader2, FileIcon, Check, Search, FolderIcon, FolderPlusIcon, FolderMinusIcon, EyeIcon, PencilIcon } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 
@@ -84,31 +84,35 @@ export default function AssistantActionsCard({
   }
   
   return (
-    <div className={cn("w-full mt-3 space-y-1", className)}>
+    <div className={cn("w-full mt-3 space-y-1 rounded-md", className)}>
       <div className="max-h-[210px] overflow-y-auto">
         {sortedOperations.map((op, index) => (
           <Card 
             key={`${op.path}-${index}`} 
-            className="bg-card/20 border-muted-foreground/10 mb-1"
+            className="bg-muted/50 border-muted-foreground/50 mb-1"
           >
             <CardContent className="p-2.5 flex items-center justify-between text-xs">
               <div className="flex items-center gap-1.5 truncate max-w-[70%]">
                 {op.status === 'pending' ? (
-                  <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin flex-shrink-0" />
+                  <Loader2 className="h-3.5 w-3.5 text-foreground animate-spin flex-shrink-0" />
                 ) : op.status === 'error' ? (
-                  <FileIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <FileIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 ) : op.type === 'search' ? (
-                  <Search className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <Search className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 ) : op.type === 'createDir' ? (
-                  <FolderPlusIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <FolderPlusIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 ) : op.type === 'removeDir' ? (
-                  <FolderMinusIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <FolderMinusIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 ) : op.type === 'create' && op.path.indexOf('.') === -1 ? (
-                  <FolderIcon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <FolderIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
+                ) : op.type === 'read' ? (
+                  <EyeIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
+                ) : op.type === 'edit' ? (
+                  <PencilIcon className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 ) : (
-                  <Check className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                  <Check className="h-3.5 w-3.5 text-foreground flex-shrink-0" />
                 )}
-                <span className="truncate text-muted-foreground">{op.path}</span>
+                <span className="truncate text-foreground">{op.path}</span>
               </div>
               <div className="text-muted-foreground text-xs flex-shrink-0">
                 {op.type === 'createDir' ? 'Created Directory' :
