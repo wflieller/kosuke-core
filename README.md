@@ -4,6 +4,8 @@ Today the first open-source vibe-coding platform, tomorrow the next geneation "I
 
 ## 🍿 Demo
 
+https://github.com/user-attachments/assets/f712dbf5-6ab4-4f08-bc7b-e8e3d0161f06
+
 ## 🚀 Getting Started
 
 ### Running Locally
