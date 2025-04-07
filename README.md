@@ -2,6 +2,8 @@
 
 Today the first open-source vibe-coding platform, tomorrow the next geneation "IDE" for Web Applications.
 
+## 🍿 Demo
+
 ## 🚀 Getting Started
 
 ### Running Locally
