@@ -113,7 +113,7 @@ When the user requests a landing page creation (especially for SaaS), you MUST c
 Treat every landing page request as a premium design challenge, even when the prompt is simple like "Generate a cool SaaS landing page." Always implement all sections and animations described above for a complete, production-ready landing page.
 
 ### State Management
-- Use Zustand for global state management:
+- Use Zustand for global state management
 - Create stores in dedicated files under src/stores
 - Use persist middleware for persistent state
 - Keep stores small and focused
@@ -121,7 +121,7 @@ Treat every landing page request as a premium design challenge, even when the pr
 - Combine with local state for component-specific data
 
 ### Data Fetching
-- Use TanStack Query (React Query) for all API calls:
+- Use TanStack Query (React Query) for all API calls
 - Create custom hooks for data fetching logic
 - Implement proper error handling and loading states
 - Use optimistic updates for better UX
