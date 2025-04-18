@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc, sql } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import path from 'path';
 import { LLM, CONTEXT } from '@/lib/constants';
@@ -6,7 +6,7 @@ import { db } from '@/lib/db/drizzle';
 import { chatMessages, actions } from '@/lib/db/schema';
 import { getProjectPath } from '@/lib/fs/operations';
 import { getTool } from '../tools';
-import { Action, normalizeAction, isValidAction } from './types';
+import { Action, normalizeAction, isValidAction, AgentErrorType } from './types';
 import { generateAICompletion, generateSummaryWithFlash } from '../api/ai';
 import { isWebRequestEnvironment } from '@/lib/environment';
 import { buildNaivePrompt } from './prompts';
@@ -19,6 +19,8 @@ type OperationType = 'create' | 'edit' | 'delete' | 'error' | 'read' | 'createDi
 type ActionExecutionResult = {
   success: boolean;
   error?: string;
+  errorType?: AgentErrorType;
+  errorDetails?: string;
   actions?: Action[];
 };
 
@@ -39,7 +41,12 @@ export class Agent {
   /**
    * Main public method to run the agent to process a project modification request
    */
-  async run(prompt: string): Promise<{ success: boolean; error?: string }> {
+  async run(prompt: string): Promise<{
+    success: boolean;
+    error?: string;
+    errorType?: AgentErrorType;
+    errorDetails?: string;
+  }> {
     console.log(`🤖 Processing modification request for project ID: ${this.projectId}`);
     const processingStart = Date.now();
 
@@ -47,7 +54,12 @@ export class Agent {
       // Create timeout promise for safety
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => {
-          reject(new Error('Processing timeout exceeded'));
+          reject(
+            new AgentError({
+              type: 'timeout',
+              message: 'Processing timeout exceeded',
+            })
+          );
         }, LLM.PROCESSING_TIMEOUT);
       });
 
@@ -82,23 +94,40 @@ export class Agent {
           console.warn(
             `⚠️ No actions returned from pipeline. Pipeline result: ${JSON.stringify(pipelineResult)}`
           );
+
+          // Send error with specific error type
           await this.sendOperationUpdate(
             'error',
             '',
             `I was unable to understand how to make the requested changes. Please try rephrasing your request.`,
-            'error'
+            'error',
+            pipelineResult.errorType || 'unknown'
           );
+
+          // Return error with type information
+          return {
+            success: false,
+            error: pipelineResult.error || 'No actions returned from pipeline',
+            errorType: pipelineResult.errorType || 'processing',
+            errorDetails: pipelineResult.errorDetails,
+          };
         }
       } catch (error) {
         // Handle error during processing
         console.error('❌ Error or timeout processing modification:', error);
-        await this.sendOperationUpdate(
-          'error',
-          '',
-          'I encountered an error while processing your request. Please try again later.',
-          'error'
-        );
-        throw error;
+
+        // Determine error type
+        const errorType = this.classifyError(error);
+        const errorMessage = this.getErrorMessage(error, errorType);
+
+        await this.sendOperationUpdate('error', '', errorMessage, 'error', errorType);
+
+        return {
+          success: false,
+          error: errorMessage,
+          errorType,
+          errorDetails: error instanceof Error ? error.stack : undefined,
+        };
       }
 
       // Revalidate path if in web environment
@@ -110,12 +139,33 @@ export class Agent {
       return { success: true };
     } catch (error) {
       console.error(`❌ Error in Agent.run:`, error);
-      return { success: false, error: 'Failed to process modification request' };
+
+      // Classify the error
+      const errorType = this.classifyError(error);
+      const errorMessage = this.getErrorMessage(error, errorType);
+
+      return {
+        success: false,
+        error: errorMessage,
+        errorType,
+        errorDetails: error instanceof Error ? error.stack : undefined,
+      };
     }
   }
 
   /**
    * Run the agentic workflow where the model can iteratively read files and gather context
+   *
+   * This method orchestrates the agent's thinking process:
+   * 1. Iteratively gathers context by reading files
+   * 2. Tracks files that have been read to avoid duplicates
+   * 3. Monitors iteration count to prevent infinite loops
+   * 4. Handles the transition from thinking to execution mode
+   *
+   * @param projectId - The ID of the current project
+   * @param prompt - The user's original request prompt
+   * @param context - Initial context for the agent
+   * @returns A result object with actions to execute or an error
    */
   private async runAgentic(
     projectId: number,
@@ -124,150 +174,255 @@ export class Agent {
   ): Promise<ActionExecutionResult> {
     console.log(`🔄 Running agentic workflow for project ID: ${projectId}`);
 
-    let isThinking = true;
+    const isThinking = true; // This is only used for the initial loop condition
     const executionLog: string[] = [];
     const gatheredContext: Record<string, string> = {};
     const readFiles = new Set<string>(); // Track unique files that have been read
     let iterationCount = 0;
 
-    // Fetch chat history for context
-    const chatHistory = await this.fetchChatHistory(projectId);
-    console.log(`📝 Fetched ${chatHistory.length} previous chat messages for context`);
+    try {
+      // Fetch chat history for context
+      const chatHistory = await this.fetchChatHistory(projectId);
+      console.log(`📝 Fetched ${chatHistory.length} previous chat messages for context`);
 
-    // Initial context
-    let currentContext = context;
+      // Initial context
+      let currentContext = context;
 
-    // Iterative loop for agentic behavior
-    while (isThinking && iterationCount < this.MAX_ITERATIONS) {
-      iterationCount++;
-      console.log(`🔄 Starting iteration ${iterationCount} of agentic workflow`);
+      // Iterative loop for agentic behavior
+      while (isThinking && iterationCount < this.MAX_ITERATIONS) {
+        iterationCount++;
+        console.log(`🔄 Starting iteration ${iterationCount} of agentic workflow`);
 
-      // Send a "Thinking..." message before each AI completion call
-      await this.sendOperationUpdate('read', '', 'Thinking...', 'pending');
+        try {
+          // Send a "Thinking..." message before each AI completion call
+          await this.sendOperationUpdate('read', '', 'Thinking...', 'pending');
 
-      // Add read files tracking to the context
-      if (readFiles.size > 0) {
-        const filesReadSection = `\n\n### Already Read Files - DO NOT READ THESE AGAIN:\n${Array.from(
-          readFiles
-        )
-          .map((file, i) => `${i + 1}. ${file}`)
-          .join('\n')}\n`;
-        // Add this near the top of the context for visibility
-        currentContext = this.addAlreadyReadFilesSection(currentContext, filesReadSection);
+          // Update context with read files tracking and iteration warnings
+          currentContext = this.updateContextWithTracking(
+            currentContext,
+            readFiles,
+            iterationCount
+          );
+
+          // Generate and parse AI response
+          const actions = await this.generateAndParseAgentResponse(
+            prompt,
+            currentContext,
+            chatHistory
+          );
+
+          // Process the parsed response
+          if (!actions.thinking) {
+            // Agent is ready to execute changes
+            console.log(
+              `✅ Agent is ready to execute changes, found ${actions.actions.length} actions`
+            );
+
+            return {
+              success: true,
+              actions: actions.actions,
+            };
+          }
+
+          // Check for duplicate read requests and potentially force execution mode
+          if (await this.shouldForceExecution(actions.actions, readFiles, iterationCount)) {
+            // Force execution mode with one final attempt
+            const finalActions = await this.forceExecutionMode(prompt, currentContext, chatHistory);
+            return {
+              success: true,
+              actions: finalActions,
+            };
+          }
+
+          // Execute read actions to gather more context
+          await this.executeReadActionsForContext(
+            actions.actions,
+            projectId,
+            executionLog,
+            gatheredContext,
+            readFiles
+          );
+
+          // Update context with gathered information
+          currentContext = this.updateContext(currentContext, gatheredContext, executionLog);
+        } catch (iterationError) {
+          console.error(`❌ Error in iteration ${iterationCount}:`, iterationError);
+
+          // Add error information to the context
+          const errorMsg = `\n\n### ERROR IN PREVIOUS ITERATION:\n${iterationError}\n\nPlease try a different approach.\n`;
+          currentContext = this.addSectionToContext(
+            currentContext,
+            errorMsg,
+            '### ERROR IN PREVIOUS ITERATION:'
+          );
+
+          // Continue to next iteration unless we're at the limit
+          if (iterationCount >= this.MAX_ITERATIONS - 1) {
+            throw iterationError;
+          }
+        }
       }
 
-      // Add iteration limit warning if approaching max
-      if (iterationCount >= Math.floor(this.MAX_ITERATIONS * 0.6)) {
-        const warningMsg = `\n\n### WARNING - APPROACHING ITERATION LIMIT:\nYou have used ${iterationCount} of ${this.MAX_ITERATIONS} available iterations. Move to implementation phase soon to avoid termination.\n`;
-        currentContext = this.addWarningSection(currentContext, warningMsg);
+      if (iterationCount >= this.MAX_ITERATIONS) {
+        console.warn(`⚠️ Reached maximum iterations (${this.MAX_ITERATIONS}) in agentic workflow`);
+        return {
+          success: false,
+          error: `Reached maximum iterations (${this.MAX_ITERATIONS}) in agentic workflow`,
+        };
       }
 
-      // Build prompt and get AI response
-      const messages = buildNaivePrompt(prompt, currentContext, chatHistory);
-      console.log(`🤖 Generating agent response for iteration ${iterationCount}`);
-      const aiResponse = await generateAICompletion(messages, {
+      // We shouldn't reach here if the workflow is properly structured
+      return { success: false, error: 'Agentic workflow completed without actions' };
+    } catch (error) {
+      console.error(`❌ Error in runAgentic:`, error);
+      return {
+        success: false,
+        error: `Error in agentic workflow: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Update context with tracking information for already read files and iteration warnings
+   */
+  private updateContextWithTracking(
+    currentContext: string,
+    readFiles: Set<string>,
+    iterationCount: number
+  ): string {
+    let updatedContext = currentContext;
+
+    // Add read files tracking to the context
+    if (readFiles.size > 0) {
+      const filesReadSection = `\n\n### Already Read Files - DO NOT READ THESE AGAIN:\n${Array.from(
+        readFiles
+      )
+        .map((file, i) => `${i + 1}. ${file}`)
+        .join('\n')}\n`;
+
+      updatedContext = this.addAlreadyReadFilesSection(updatedContext, filesReadSection);
+    }
+
+    // Add iteration limit warning if approaching max
+    if (iterationCount >= Math.floor(this.MAX_ITERATIONS * 0.6)) {
+      const warningMsg = `\n\n### WARNING - APPROACHING ITERATION LIMIT:\nYou have used ${iterationCount} of ${this.MAX_ITERATIONS} available iterations. Move to implementation phase soon to avoid termination.\n`;
+      updatedContext = this.addWarningSection(updatedContext, warningMsg);
+    }
+
+    return updatedContext;
+  }
+
+  /**
+   * Generate a response from the AI and parse it into the agent's thinking state and actions
+   */
+  private async generateAndParseAgentResponse(
+    prompt: string,
+    currentContext: string,
+    chatHistory: { role: 'system' | 'user' | 'assistant'; content: string }[]
+  ): Promise<{ thinking: boolean; actions: Action[] }> {
+    // Build prompt and get AI response
+    const messages = buildNaivePrompt(prompt, currentContext, chatHistory);
+    console.log(`🤖 Generating agent response`);
+
+    const aiResponse = await generateAICompletion(messages, {
+      timeoutMs: this.DEFAULT_TIMEOUT_MS,
+      maxTokens: this.DEFAULT_MAX_TOKENS,
+    });
+
+    // Parse the AI response
+    console.log(`🔍 Parsing AI response`);
+    const parsedResponse = this.parseAgentResponse(aiResponse);
+    console.log(`📋 Parsed response:`, JSON.stringify(parsedResponse, null, 2));
+
+    return parsedResponse;
+  }
+
+  /**
+   * Determine if we should force the agent into execution mode based on read actions
+   */
+  private async shouldForceExecution(
+    actions: Action[],
+    readFiles: Set<string>,
+    iterationCount: number
+  ): Promise<boolean> {
+    // Check for duplicate read requests
+    const duplicateReads = actions
+      .filter(a => a.action === 'readFile' && readFiles.has(a.filePath))
+      .map(a => a.filePath);
+
+    if (duplicateReads.length > 0) {
+      console.warn(`⚠️ Agent is trying to reread files: ${duplicateReads.join(', ')}`);
+
+      // Force execution mode if too many duplicates or too many iterations
+      return duplicateReads.length >= 3 || iterationCount >= Math.floor(this.MAX_ITERATIONS * 0.8);
+    }
+
+    return false;
+  }
+
+  /**
+   * Force the agent into execution mode with a final attempt
+   */
+  private async forceExecutionMode(
+    prompt: string,
+    currentContext: string,
+    chatHistory: { role: 'system' | 'user' | 'assistant'; content: string }[]
+  ): Promise<Action[]> {
+    console.warn(
+      `⚠️ Forcing agent to execution mode due to duplicate reads or high iteration count`
+    );
+
+    // Add a final warning to context that we're forcing execution
+    const forcedExecutionMsg = `\n\n### SYSTEM NOTICE - FORCING EXECUTION MODE:\nYou've attempted to reread files multiple times or have used too many iterations. Based on the files you've already read, proceed to implementation immediately.\n`;
+    const finalContext = this.addWarningSection(currentContext, forcedExecutionMsg);
+
+    // One more attempt with the forced execution message
+    const finalMessages = buildNaivePrompt(prompt, finalContext, chatHistory);
+    console.log(`🤖 Generating final agent response before forcing execution`);
+
+    try {
+      const finalResponse = await generateAICompletion(finalMessages, {
         timeoutMs: this.DEFAULT_TIMEOUT_MS,
         maxTokens: this.DEFAULT_MAX_TOKENS,
       });
 
-      // Parse the AI response
-      console.log(`🔍 Parsing AI response for iteration ${iterationCount}`);
-      const parsedResponse = this.parseAgentResponse(aiResponse);
-      console.log(
-        `📋 Parsed response for iteration ${iterationCount}:`,
-        JSON.stringify(parsedResponse, null, 2)
-      );
+      // Parse the response but override thinking to false
+      const finalParsedResponse = this.parseAgentResponse(finalResponse);
+      finalParsedResponse.thinking = false;
 
-      // Check if the agent is still thinking or ready to execute
-      isThinking = parsedResponse.thinking;
-
-      if (isThinking) {
-        // Check for duplicate read requests
-        const duplicateReads = parsedResponse.actions
-          .filter(a => a.action === 'readFile' && readFiles.has(a.filePath))
-          .map(a => a.filePath);
-
-        if (duplicateReads.length > 0) {
-          console.warn(`⚠️ Agent is trying to reread files: ${duplicateReads.join(', ')}`);
-
-          // Force execution mode if too many duplicates or too many iterations
-          if (
-            duplicateReads.length >= 3 ||
-            iterationCount >= Math.floor(this.MAX_ITERATIONS * 0.8)
-          ) {
-            console.warn(
-              `⚠️ Forcing agent to execution mode due to duplicate reads or high iteration count`
-            );
-            // Add a final warning to context that we're forcing execution
-            const forcedExecutionMsg = `\n\n### SYSTEM NOTICE - FORCING EXECUTION MODE:\nYou've attempted to reread files multiple times or have used too many iterations. Based on the files you've already read, proceed to implementation immediately.\n`;
-            currentContext = this.addWarningSection(currentContext, forcedExecutionMsg);
-
-            // One more attempt with the forced execution message
-            const finalMessages = buildNaivePrompt(prompt, currentContext, chatHistory);
-            console.log(`🤖 Generating final agent response before forcing execution`);
-            const finalResponse = await generateAICompletion(finalMessages, {
-              timeoutMs: this.DEFAULT_TIMEOUT_MS,
-              maxTokens: this.DEFAULT_MAX_TOKENS,
-            });
-
-            // Parse the response but override thinking to false
-            const finalParsedResponse = this.parseAgentResponse(finalResponse);
-            finalParsedResponse.thinking = false;
-
-            if (finalParsedResponse.actions.length > 0) {
-              // Use the actions from the final response
-              return {
-                success: true,
-                actions: finalParsedResponse.actions,
-              };
-            } else {
-              // No actions returned, return error
-              return {
-                success: false,
-                error: 'Agent unable to produce actions after multiple iterations.',
-              };
-            }
-          }
-        }
-
-        // Execute read actions to gather more context
-        await this.executeReadActionsForContext(
-          parsedResponse.actions,
-          projectId,
-          executionLog,
-          gatheredContext,
-          readFiles // Pass read files set to track what's been read
-        );
-
-        // Update context with gathered information
-        currentContext = this.updateContext(currentContext, gatheredContext, executionLog);
+      if (finalParsedResponse.actions.length > 0) {
+        // Use the actions from the final response
+        return finalParsedResponse.actions;
       } else {
-        console.log(
-          `✅ Agent is ready to execute changes, found ${parsedResponse.actions.length} actions`
-        );
-
-        // Return the final actions for execution
-        return {
-          success: true,
-          actions: parsedResponse.actions,
-        };
+        // No actions returned, throw error
+        throw new AgentError({
+          type: 'processing',
+          message: 'Agent unable to produce actions after multiple iterations',
+          details: 'The LLM produced a valid response but did not specify any actions to take',
+        });
       }
-    }
+    } catch (error) {
+      // Rethrow AgentError to preserve type information
+      if (error instanceof AgentError) {
+        throw error;
+      }
 
-    if (iterationCount >= this.MAX_ITERATIONS) {
-      console.warn(`⚠️ Reached maximum iterations (${this.MAX_ITERATIONS}) in agentic workflow`);
-      return {
-        success: false,
-        error: `Reached maximum iterations (${this.MAX_ITERATIONS}) in agentic workflow`,
-      };
+      // Wrap other errors
+      throw new AgentError({
+        type: 'processing',
+        message: 'Failed to force execution mode',
+        details: error instanceof Error ? error.message : String(error),
+      });
     }
-
-    // We shouldn't reach here if the workflow is properly structured
-    return { success: false, error: 'Agentic workflow completed without actions' };
   }
 
   /**
    * Parse the AI response to extract structured agent response
+   *
+   * Processes the LLM response into a structured format with thinking state and actions
+   *
+   * @param response - The raw response from the LLM
+   * @returns Structured object with thinking state and valid actions
    */
   private parseAgentResponse(response: string | { text: string; modelType: string }): {
     thinking: boolean;
@@ -289,17 +444,17 @@ export class Agent {
         cleanedResponse.substring(0, 200) + (cleanedResponse.length > 200 ? '...' : '')
       );
 
-      // Parse the response as JSON
+      // Default values for the result
+      const result = {
+        thinking: true, // Default to thinking mode
+        actions: [] as Action[],
+      };
+
       try {
+        // Parse the response as JSON
         const parsedResponse = JSON.parse(cleanedResponse) as {
           thinking?: boolean;
           actions?: unknown[];
-        };
-
-        // Default values
-        const result = {
-          thinking: true, // Default to thinking mode
-          actions: [] as Action[],
         };
 
         // Set thinking state if provided
@@ -313,15 +468,19 @@ export class Agent {
             `✅ Successfully parsed JSON: ${parsedResponse.actions.length} potential actions found`
           );
 
-          // Validate each action
-          parsedResponse.actions.forEach((action, idx) => {
-            if (isValidAction(action)) {
-              result.actions.push(normalizeAction(action as Action));
-            } else {
-              console.warn(`⚠️ Invalid action at index ${idx}`);
-            }
-          });
+          // Validate each action and add to result
+          const validActions = parsedResponse.actions
+            .map((action, idx) => {
+              if (isValidAction(action)) {
+                return normalizeAction(action as Action);
+              } else {
+                console.warn(`⚠️ Invalid action at index ${idx}: ${JSON.stringify(action)}`);
+                return null;
+              }
+            })
+            .filter((action): action is Action => action !== null);
 
+          result.actions = validActions;
           console.log(`✅ Found ${result.actions.length} valid actions`);
         } else {
           console.warn(`⚠️ Response parsed as JSON but actions is not an array or is missing`);
@@ -329,29 +488,49 @@ export class Agent {
 
         return result;
       } catch (jsonError) {
-        console.error(`❌ Error parsing JSON:`, jsonError);
-
-        // Show context around the error if possible
-        if (jsonError instanceof SyntaxError && jsonError.message.includes('position')) {
-          const posMatch = jsonError.message.match(/position (\d+)/);
-          if (posMatch && posMatch[1]) {
-            const errorPos = parseInt(posMatch[1], 10);
-            const start = Math.max(0, errorPos - 30);
-            const end = Math.min(cleanedResponse.length, errorPos + 30);
-
-            console.log(`⚠️ JSON error at position ${errorPos}. Context around error:`);
-            console.log(
-              `Error context: ...${cleanedResponse.substring(start, errorPos)}[ERROR]${cleanedResponse.substring(errorPos, end)}...`
-            );
-          }
-        }
+        this.logJsonParseError(jsonError, cleanedResponse);
+        throw new AgentError({
+          type: 'parsing',
+          message: 'Failed to parse JSON response from LLM',
+          details: jsonError instanceof Error ? jsonError.message : String(jsonError),
+        });
       }
-
-      // Return default structure on error
-      return { thinking: true, actions: [] };
     } catch (error) {
       console.error('❌ Error parsing agent response:', error);
-      return { thinking: true, actions: [] };
+
+      // Determine if this is an AgentError or a different type of error
+      if (error instanceof AgentError) {
+        throw error; // Rethrow AgentError to maintain type information
+      }
+
+      // Create a new AgentError for other error types
+      throw new AgentError({
+        type: 'processing',
+        message: 'Error processing agent response',
+        details: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Log JSON parsing errors with helpful context
+   */
+  private logJsonParseError(jsonError: unknown, cleanedResponse: string): void {
+    console.error(`❌ Error parsing JSON:`, jsonError);
+
+    // Show context around the error if possible
+    if (jsonError instanceof SyntaxError && jsonError.message.includes('position')) {
+      const posMatch = jsonError.message.match(/position (\d+)/);
+      if (posMatch && posMatch[1]) {
+        const errorPos = parseInt(posMatch[1], 10);
+        const start = Math.max(0, errorPos - 30);
+        const end = Math.min(cleanedResponse.length, errorPos + 30);
+
+        console.log(`⚠️ JSON error at position ${errorPos}. Context around error:`);
+        console.log(
+          `Error context: ...${cleanedResponse.substring(start, errorPos)}[ERROR]${cleanedResponse.substring(errorPos, end)}...`
+        );
+      }
     }
   }
 
@@ -406,26 +585,75 @@ export class Agent {
     operationType: OperationType,
     filePath: string,
     operationMessage: string,
-    status: 'pending' | 'completed' | 'error' = 'completed'
+    status: 'pending' | 'completed' | 'error' = 'completed',
+    errorType?: AgentErrorType
   ) {
     try {
       console.log(
         `📝 Sending operation update: ${operationType} ${filePath} (${status}): ${operationMessage.substring(0, 50)}...`
       );
 
+      // Count tokens for this message
+      const { countTokens } = await import('../utils/context');
+      const messageTokensOutput = countTokens(operationMessage);
+
+      // Calculate cumulative token totals
+      const tokenTotals = await db
+        .select({
+          totalInput: sql`SUM(tokens_input)`,
+          totalOutput: sql`SUM(tokens_output)`,
+        })
+        .from(chatMessages)
+        .where(eq(chatMessages.projectId, this.projectId));
+
+      // Use totals or default to 0 if null
+      const totalTokensOutput = Number(tokenTotals[0]?.totalOutput || 0) + messageTokensOutput;
+
+      // Get current context from most recent message for this request
+      const latestMessages = await db
+        .select()
+        .from(chatMessages)
+        .where(eq(chatMessages.projectId, this.projectId))
+        .orderBy(desc(chatMessages.timestamp))
+        .limit(1);
+
+      const currentContextSize =
+        latestMessages.length > 0 && latestMessages[0].contextTokens
+          ? latestMessages[0].contextTokens
+          : 0;
+
       // Always create a new message for each operation update to provide real-time feedback
       console.log(`📝 Creating new message for operation update...`);
-      const [newMessage] = await db
-        .insert(chatMessages)
-        .values({
-          projectId: this.projectId,
-          content: operationMessage,
-          role: 'assistant',
-        })
-        .returning();
+
+      // Create the insert values - use a specific type based on schema
+      const insertValues: {
+        projectId: number;
+        content: string;
+        role: string;
+        tokensInput: number;
+        tokensOutput: number;
+        contextTokens: number;
+        metadata?: string;
+      } = {
+        projectId: this.projectId,
+        content: operationMessage,
+        role: 'assistant',
+        tokensInput: 0, // No additional input tokens for assistant messages
+        tokensOutput: messageTokensOutput, // Tokens in this message
+        contextTokens: currentContextSize, // Maintain the current context size
+      };
+
+      // Add metadata if we have an error type and the schema supports it
+      if (errorType) {
+        // Add metadata field - we'll handle any errors from the database
+        insertValues.metadata = JSON.stringify({ errorType });
+      }
+
+      const [newMessage] = await db.insert(chatMessages).values(insertValues).returning();
 
       const messageId = newMessage.id;
       console.log(`✅ Created new assistant message: ${messageId} for operation`);
+      console.log(`📊 Total tokens output (including this message): ${totalTokensOutput}`);
 
       // Map operationType to proper type for database
       const dbOperationType = this.mapOperationTypeForDb(operationType);
@@ -461,7 +689,15 @@ export class Agent {
 
       return {
         success: true,
-        message: { id: messageId, content: operationMessage, role: 'assistant' },
+        message: {
+          id: messageId,
+          content: operationMessage,
+          role: 'assistant',
+          tokensOutput: messageTokensOutput,
+          contextTokens: currentContextSize,
+          totalTokensOutput,
+          errorType, // Include error type in the return value
+        },
       };
     } catch (error) {
       console.error(`❌ Error sending operation update:`, error);
@@ -796,77 +1032,138 @@ export class Agent {
     readFiles: Set<string> // Track files that have been read
   ) {
     console.log(`🧠 Agent is still in thinking mode, executing read actions...`);
+    const { countTokens } = await import('../utils/context');
 
-    for (const action of actions) {
-      if (action.action === 'readFile') {
-        console.log(`📖 Reading file: ${action.filePath}`);
-        executionLog.push(`Read ${action.filePath}`);
+    // Filter actions to only include read actions
+    const readActions = actions.filter(action => action.action === 'readFile');
+    if (readActions.length === 0) {
+      console.log('No read actions to execute');
+      return;
+    }
 
-        // Track this file as being read
-        readFiles.add(action.filePath);
+    // Get current context size from the latest message
+    const latestMessages = await db
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.projectId, projectId))
+      .orderBy(desc(chatMessages.timestamp))
+      .limit(1);
 
-        try {
-          // Get the readFile tool
-          const readTool = getTool('readFile');
-          if (!readTool) {
-            console.error(`❌ readFile tool not found`);
-            continue;
-          }
+    let currentContextSize =
+      latestMessages.length > 0 && latestMessages[0].contextTokens
+        ? latestMessages[0].contextTokens
+        : 0;
 
-          // Send an update that we're reading this file
-          const pendingResult = await this.sendOperationUpdate(
-            'read',
-            action.filePath,
-            action.message,
-            'pending'
-          );
+    // Get current token totals
+    const tokenTotals = await db
+      .select({
+        totalInput: sql`SUM(tokens_input)`,
+        totalOutput: sql`SUM(tokens_output)`,
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.projectId, projectId));
 
-          // Store the message ID to update later
-          const messageId = pendingResult.message?.id;
+    let totalTokensInput = Number(tokenTotals[0]?.totalInput || 0);
 
-          if (!messageId) {
-            console.error(`❌ Failed to create pending message for reading ${action.filePath}`);
-            continue;
-          }
+    // Get the readFile tool once for all read actions
+    const readTool = getTool('readFile');
+    if (!readTool) {
+      console.error(`❌ readFile tool not found`);
+      return;
+    }
 
-          // Execute the read tool
-          const fullPath = path.join(getProjectPath(projectId), action.filePath);
-          const result = await readTool.execute(fullPath);
+    for (const action of readActions) {
+      console.log(`📖 Reading file: ${action.filePath}`);
+      executionLog.push(`Read ${action.filePath}`);
 
-          if (typeof result === 'object' && result !== null && 'success' in result) {
-            if (result.success && 'content' in result) {
-              // Store the file content in gathered context
-              gatheredContext[action.filePath] = result.content as string;
-              console.log(
-                `✅ Successfully read file: ${action.filePath} (${(result.content as string).length} chars)`
-              );
+      // Skip already read files
+      if (readFiles.has(action.filePath)) {
+        console.warn(`⚠️ Skip reading already read file: ${action.filePath}`);
+        continue;
+      }
 
-              // Update the existing message's status
-              await this.updateActionStatus(messageId, action.filePath, 'read', 'completed');
-            } else {
-              console.error(`❌ Failed to read file: ${action.filePath}`);
-              gatheredContext[action.filePath] = `Error: Could not read file`;
+      // Track this file as being read
+      readFiles.add(action.filePath);
 
-              // Update with error status
-              await this.updateActionStatus(messageId, action.filePath, 'read', 'error');
-              await this.updateMessageContent(
-                messageId,
-                `Error reading ${action.filePath}: Could not read file`
-              );
-            }
-          }
-        } catch (error) {
-          console.error(`❌ Error reading file ${action.filePath}:`, error);
-          gatheredContext[action.filePath] = `Error: ${error}`;
+      try {
+        // Send an update that we're reading this file
+        const pendingResult = await this.sendOperationUpdate(
+          'read',
+          action.filePath,
+          action.message,
+          'pending'
+        );
 
-          // Since we couldn't track the message ID in this case, create a new error message
-          await this.sendOperationUpdate(
-            'error',
-            action.filePath,
-            `Error reading ${action.filePath}: ${error}`,
-            'error'
-          );
+        // Store the message ID to update later
+        const messageId = pendingResult.message?.id;
+
+        if (!messageId) {
+          console.error(`❌ Failed to create pending message for reading ${action.filePath}`);
+          continue;
         }
+
+        // Execute the read tool
+        const fullPath = path.join(getProjectPath(projectId), action.filePath);
+        const result = await readTool.execute(fullPath);
+
+        if (typeof result === 'object' && result !== null && 'success' in result) {
+          if (result.success && 'content' in result) {
+            const fileContent = result.content as string;
+
+            // Count tokens in the file content
+            const fileTokens = countTokens(fileContent);
+
+            // Update context size - this adds to the current context window
+            currentContextSize += fileTokens;
+
+            // Update total tokens input - file content is sent to the LLM
+            totalTokensInput += fileTokens;
+
+            // Log the current context size
+            console.log(
+              `📊 Current context size: ${currentContextSize} tokens (added ${fileTokens} tokens from ${action.filePath})`
+            );
+            console.log(`📊 Total tokens input: ${totalTokensInput} tokens`);
+
+            // Update the database to reflect the new context size for the current request
+            // and add the file tokens to tokensInput since they're sent to the LLM
+            await db
+              .update(chatMessages)
+              .set({
+                contextTokens: currentContextSize,
+                tokensInput: fileTokens, // Count file tokens as input tokens
+              })
+              .where(eq(chatMessages.id, messageId));
+
+            // Store the file content in gathered context
+            gatheredContext[action.filePath] = fileContent;
+            console.log(`✅ Successfully read file: ${action.filePath} (${fileTokens} tokens)`);
+
+            // Update the existing message's status
+            await this.updateActionStatus(messageId, action.filePath, 'read', 'completed');
+          } else {
+            console.error(`❌ Failed to read file: ${action.filePath}`);
+            gatheredContext[action.filePath] = `Error: Could not read file`;
+
+            // Update with error status
+            await this.updateActionStatus(messageId, action.filePath, 'read', 'error');
+            await this.updateMessageContent(
+              messageId,
+              `Error reading ${action.filePath}: Could not read file`
+            );
+          }
+        }
+      } catch (error) {
+        console.error(`❌ Error reading file ${action.filePath}:`, error);
+        gatheredContext[action.filePath] = `Error: ${error}`;
+
+        // Since we couldn't track the message ID in this case, create a new error message
+        await this.sendOperationUpdate(
+          'error',
+          action.filePath,
+          `Error reading ${action.filePath}: ${error}`,
+          'error'
+        );
       }
     }
   }
@@ -952,47 +1249,123 @@ export class Agent {
   }
 
   /**
+   * Add a section to the context at a specified position
+   * @param context The current context string
+   * @param sectionContent The content to add
+   * @param sectionIdentifier The identifier of the section for removal/replacement
+   * @returns Updated context with the new section added
+   */
+  private addSectionToContext(
+    context: string,
+    sectionContent: string,
+    sectionIdentifier: string
+  ): string {
+    try {
+      // Remove any existing section with the same identifier
+      const sectionRegex = new RegExp(`\n\n${sectionIdentifier}[\\s\\S]*?(?=\n\n### |$)`, 'g');
+      const cleanContext = context.replace(sectionRegex, '').trim();
+
+      // Add the section near the beginning, after any initial instructions
+      const parts = cleanContext.split('\n\n', 1);
+      if (parts.length > 0) {
+        const firstPart = parts[0];
+        const restOfContext = cleanContext.substring(firstPart.length);
+        return firstPart + '\n\n' + sectionContent + restOfContext;
+      }
+
+      // If splitting didn't work, just prepend
+      return sectionContent + '\n\n' + cleanContext;
+    } catch (error) {
+      console.error(`Error adding section to context: ${error}`);
+      // Fall back to simple concatenation in case of error
+      return sectionContent + '\n\n' + context;
+    }
+  }
+
+  /**
    * Add already read files section to the context
    */
   private addAlreadyReadFilesSection(context: string, filesReadSection: string): string {
-    // Remove any existing "Already Read Files" section
-    const cleanContext = context.replace(
-      /\n\n### Already Read Files - DO NOT READ THESE AGAIN:[\s\S]*?(?=\n\n### |$)/,
-      ''
+    return this.addSectionToContext(
+      context,
+      filesReadSection,
+      '### Already Read Files - DO NOT READ THESE AGAIN:'
     );
-
-    // Add the new section near the beginning, after any initial instructions
-    const parts = cleanContext.split('\n\n', 1);
-    if (parts.length > 0) {
-      const firstPart = parts[0];
-      const restOfContext = cleanContext.substring(firstPart.length);
-      return firstPart + filesReadSection + restOfContext;
-    }
-
-    // If splitting didn't work, just prepend
-    return filesReadSection + cleanContext;
   }
 
   /**
    * Add warning section to the context
    */
   private addWarningSection(context: string, warningMsg: string): string {
-    // Remove any existing warning with the same beginning
-    const warningStart = warningMsg.split('\n')[0];
-    const cleanContext = context.replace(
-      new RegExp(`${warningStart}[\\s\\S]*?(?=\\n\\n### |$)`),
-      ''
-    );
+    // Extract the section identifier from the warning message
+    const warningIdentifier = warningMsg.split('\n')[0];
+    return this.addSectionToContext(context, warningMsg, warningIdentifier);
+  }
 
-    // Add the warning near the beginning for visibility
-    const parts = cleanContext.split('\n\n', 1);
-    if (parts.length > 0) {
-      const firstPart = parts[0];
-      const restOfContext = cleanContext.substring(firstPart.length);
-      return firstPart + warningMsg + restOfContext;
+  /**
+   * Classify an error by type
+   */
+  private classifyError(error: unknown): AgentErrorType {
+    if (error instanceof AgentError) {
+      return error.type;
     }
 
-    // If splitting didn't work, just prepend
-    return warningMsg + cleanContext;
+    if (error instanceof Error) {
+      if (error.message.includes('timeout') || error.message.includes('timed out')) {
+        return 'timeout';
+      }
+      if (error.message.includes('parse') || error.message.includes('JSON')) {
+        return 'parsing';
+      }
+    }
+
+    return 'unknown';
+  }
+
+  /**
+   * Get an appropriate error message based on error type
+   */
+  private getErrorMessage(error: unknown, errorType: AgentErrorType): string {
+    switch (errorType) {
+      case 'timeout':
+        return 'The request took too long to process. Please try a simpler request or try again later.';
+      case 'parsing':
+        return 'There was an error processing the AI response. Please try again or simplify your request.';
+      case 'processing':
+        return 'There was an error processing your request. Please try rephrasing it.';
+      case 'unknown':
+      default:
+        return error instanceof Error
+          ? `Error: ${error.message}`
+          : 'An unexpected error occurred. Please try again later.';
+    }
+  }
+}
+
+/**
+ * Custom AgentError class
+ */
+class AgentError extends Error {
+  type: AgentErrorType;
+  details?: string;
+
+  constructor({
+    type,
+    message,
+    details,
+  }: {
+    type: AgentErrorType;
+    message: string;
+    details?: string;
+  }) {
+    super(message);
+    this.type = type;
+    this.details = details;
+    this.name = 'AgentError';
+
+    // Capture stack trace
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, AgentError);
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { eq, desc, inArray } from 'drizzle-orm';
+import { eq, desc, inArray, sql } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
@@ -21,6 +21,9 @@ const sendMessageSchema = z.union([
     content: z.string()
   })
 ]);
+
+// Error types to match the Agent error types
+type ErrorType = 'timeout' | 'parsing' | 'processing' | 'unknown';
 
 /**
  * Get chat history for a project
@@ -84,84 +87,6 @@ async function processFormDataRequest(req: NextRequest, projectId: number): Prom
     imageUrl
   };
 }
-
-/**
- * Extract image URLs from prompt content
- * Currently used by the convertToMultiModalContent function for future implementation.
- */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-function extractImageUrls(prompt: string): string[] {
-  // Regular expression to match Markdown image links
-  const imageRegex = /\[Attached Image\]\(([^)]+)\)/g;
-  const imageUrls: string[] = [];
-  let match;
-
-  while ((match = imageRegex.exec(prompt)) !== null) {
-    // Extract the actual image URL from the markdown link
-    const imageUrl = match[1];
-    // Ensure URLs are properly formed
-    if (imageUrl && (imageUrl.startsWith('http://') || imageUrl.startsWith('https://'))) {
-      imageUrls.push(imageUrl);
-    }
-  }
-
-  return imageUrls;
-}
-/* eslint-enable @typescript-eslint/no-unused-vars */
-
-/**
- * Convert a text prompt with image URLs to multi-modal content
- * This function is intended for use with AI models that support multimodal inputs.
- * Currently, it's kept for future use with the Agent class.
- */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-function convertToMultiModalContent(
-  prompt: string
-): Array<{ type: 'text' | 'image' | 'image_url'; text?: string; image_url?: { url: string } }> {
-  const imageUrls = extractImageUrls(prompt);
-
-  // If no images, return simple text content
-  if (imageUrls.length === 0) {
-    return [{ type: 'text', text: prompt }];
-  }
-
-  // Replace image URLs with placeholders to split the text
-  let processedText = prompt;
-  const imagePlaceholders: Map<string, string> = new Map();
-
-  imageUrls.forEach((url, index) => {
-    const placeholder = `__IMAGE_PLACEHOLDER_${index}__`;
-    processedText = processedText.replace(`[Attached Image](${url})`, placeholder);
-    imagePlaceholders.set(placeholder, url);
-  });
-
-  // Split text by placeholders and create multi-modal content
-  const parts: Array<{
-    type: 'text' | 'image' | 'image_url';
-    text?: string;
-    image_url?: { url: string };
-  }> = [];
-  const segments = processedText.split(/(__IMAGE_PLACEHOLDER_\d+__)/);
-
-  segments.forEach(segment => {
-    if (imagePlaceholders.has(segment)) {
-      // This is an image placeholder
-      parts.push({
-        type: 'image_url',
-        image_url: { url: imagePlaceholders.get(segment)! },
-      });
-    } else if (segment.trim()) {
-      // This is a text segment
-      parts.push({
-        type: 'text',
-        text: segment.trim(),
-      });
-    }
-  });
-
-  return parts;
-}
-/* eslint-enable @typescript-eslint/no-unused-vars */
 
 /**
  * GET /api/projects/[id]/chat
@@ -362,13 +287,42 @@ export async function POST(
       console.log('Detected images in the message');
     }
 
-    // Save the user message to the database
+    // Count tokens for input message using tiktoken
+    const { countTokens } = await import('@/lib/llm/utils/context');
+    const messageTokens = countTokens(messageContent);
+    
+    // Calculate cumulative token totals
+    // Get the sum of all tokens sent and received for this project
+    const tokenTotals = await db
+      .select({
+        totalInput: sql`SUM(tokens_input)`,
+        totalOutput: sql`SUM(tokens_output)`
+      })
+      .from(chatMessages)
+      .where(eq(chatMessages.projectId, projectId));
+    
+    // Use the totals or default to 0 if null
+    const totalTokensInput = Number(tokenTotals[0]?.totalInput || 0) + messageTokens;
+    const totalTokensOutput = Number(tokenTotals[0]?.totalOutput || 0);
+    
+    console.log(`📊 Message tokens: ${messageTokens}`);
+    console.log(`📊 Total tokens input (including this message): ${totalTokensInput}`);
+    console.log(`📊 Total tokens output: ${totalTokensOutput}`);
+    
+    // Reset context size to just this message when starting a new interaction
+    const contextTokens = messageTokens;
+    
+    // Save the user message to the database with the current message tokens
+    // Current message tokens added to tokensInput for this message
     await db.insert(chatMessages).values({
       projectId,
       userId: session.user.id,
       content: messageContent,
       role: 'user',
       modelType: 'premium',
+      tokensInput: messageTokens,      // Tokens in this message
+      tokensOutput: 0,                 // No output tokens for user messages
+      contextTokens,                   // Reset context tokens to just this message
     });
 
     console.log(`Processing request with Agent class for project ${projectId}`);
@@ -379,17 +333,53 @@ export async function POST(
 
     if (!agentResult.success) {
       console.error('Error processing request:', agentResult.error);
+      
+      // Return error with type information if available
       return NextResponse.json(
-        { message: 'Error processing request', error: agentResult.error },
+        { 
+          success: false, 
+          error: agentResult.error || 'Error processing request',
+          errorType: agentResult.errorType || 'unknown',
+          errorDetails: agentResult.errorDetails
+        },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ success: true });
+    // Success response
+    return NextResponse.json({ 
+      success: true, 
+      totalTokensInput,
+      totalTokensOutput,
+      contextTokens: messageTokens
+    });
   } catch (error) {
     console.error('Error processing chat:', error);
+    
+    // Determine error type for better client handling
+    let errorType: ErrorType = 'unknown';
+    let errorMessage = 'Error processing request';
+    
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      // Try to determine error type
+      if ('errorType' in error && typeof (error as Record<string, unknown>).errorType === 'string') {
+        errorType = (error as Record<string, unknown>).errorType as ErrorType;
+      } else if (error.message.includes('timeout') || error.message.includes('timed out')) {
+        errorType = 'timeout';
+      } else if (error.message.includes('parse') || error.message.includes('JSON')) {
+        errorType = 'parsing';
+      } else {
+        errorType = 'processing';
+      }
+    }
+    
     return NextResponse.json(
-      { message: 'Error processing request', error: String(error) },
+      { 
+        success: false, 
+        error: errorMessage,
+        errorType
+      },
       { status: 500 }
     );
   }
