@@ -10,7 +10,7 @@ import { Action, normalizeAction, isValidAction, AgentErrorType } from './types'
 import { generateAICompletion, generateSummaryWithFlash } from '../api/ai';
 import { isWebRequestEnvironment } from '@/lib/environment';
 import { buildNaivePrompt } from './prompts';
-import { getProjectContextOnlyDirectoryStructure } from '../utils/context';
+import { getProjectContextWithDirectoryStructureAndAnalysis } from '../utils/context';
 
 // Action operation type mapping for database operations
 type OperationType = 'create' | 'edit' | 'delete' | 'error' | 'read' | 'createDir' | 'removeDir';
@@ -68,7 +68,7 @@ export class Agent {
         let context = '';
         try {
           console.log(`🔍 Getting project context for projectId: ${this.projectId}`);
-          context = await getProjectContextOnlyDirectoryStructure(this.projectId, {
+          context = await getProjectContextWithDirectoryStructureAndAnalysis(this.projectId, {
             maxSize: CONTEXT.MAX_CONTEXT_SIZE,
             excludeDirs: CONTEXT.EXCLUDE_DIRS,
           });

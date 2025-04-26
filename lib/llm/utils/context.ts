@@ -3,6 +3,7 @@ import { encoding_for_model } from 'tiktoken';
 
 import { CONTEXT } from '@/lib/constants';
 import { readFile, listFilesRecursively, getProjectPath } from '../../fs/operations';
+import { analyzeTsWithMorph, Relationship } from './analysis/analyzeTsWithMorph';
 
 /**
  * Count tokens using tiktoken library
@@ -21,6 +22,17 @@ export function countTokens(text: string): number {
     // Fallback to approximately 4 characters per token
     return Math.ceil(text.length / 4);
   }
+}
+
+/**
+ * Format a docstring by removing leading asterisks and whitespace
+ */
+function formatDocstring(docstring: string): string {
+  return docstring
+    .split('\n')
+    .map(line => line.trim().replace(/^\*\s*/, ''))
+    .join('\n')
+    .trim();
 }
 
 /**
@@ -134,18 +146,102 @@ ${generateOutput(tree)}
 }
 
 /**
- * Get the context for a project
+ * Extract method signatures and their docstrings from file content
  */
-export async function getProjectContext(
+export function extractMethodSignatures(content: string, extension: string): string[] {
+  try {
+    const signatures: string[] = [];
+    // Set a reasonable maximum size limit to avoid issues with large files
+    const contentToProcess = content.length > 500000 ? content.substring(0, 500000) : content;
+
+    // Different patterns for different file types
+    if (['.ts', '.tsx', '.js', '.jsx'].includes(extension)) {
+      // JavaScript/TypeScript patterns
+
+      try {
+        // Match function declarations with docstrings
+        const functionWithDocPattern =
+          /\/\*\*[\s\S]*?\*\/\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)\s*(?::\s*[^{]+)?\s*{/g;
+        let match;
+
+        while ((match = functionWithDocPattern.exec(contentToProcess)) !== null) {
+          try {
+            const matchText = match[0];
+            const funcName = match[1];
+            const params = match[2]?.trim() || '';
+
+            // Extract the docstring
+            const docstringMatch = matchText.match(/\/\*\*([\s\S]*?)\*\//);
+            const docstring = docstringMatch ? formatDocstring(docstringMatch[1]) : '';
+
+            signatures.push(
+              docstring ? `${docstring}\n${funcName}(${params})` : `${funcName}(${params})`
+            );
+          } catch (matchError) {
+            console.warn('Error processing function declaration match:', matchError);
+            continue;
+          }
+        }
+      } catch (patternError) {
+        console.warn('Error processing function declarations with docstrings:', patternError);
+      }
+
+      try {
+        // Match function declarations WITHOUT docstrings
+        const functionPattern =
+          /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)\s*(?::\s*[^{]+)?\s*{/g;
+        let match;
+        while ((match = functionPattern.exec(contentToProcess)) !== null) {
+          try {
+            const funcName = match[1];
+            const params = match[2]?.trim() || '';
+
+            // Avoid duplicates
+            if (!signatures.some(sig => sig.includes(`${funcName}(`))) {
+              signatures.push(`${funcName}(${params})`);
+            }
+          } catch (matchError) {
+            console.warn('Error processing function declaration match:', matchError);
+            continue;
+          }
+        }
+      } catch (patternError) {
+        console.warn('Error processing function declarations without docstrings:', patternError);
+      }
+
+      // Limit the number of signatures to avoid performance issues
+      if (signatures.length > 100) {
+        console.log(`Limiting method signatures to 100 (found ${signatures.length})`);
+        return signatures.slice(0, 100);
+      }
+
+      return signatures;
+    } else if (['.py'].includes(extension)) {
+      // Python patterns implementation (shortened for brevity)
+      return signatures;
+    } else {
+      // Unsupported file extension
+      return [];
+    }
+  } catch (error) {
+    console.error('Error extracting method signatures:', error);
+    return [];
+  }
+}
+
+/**
+ * Get project context with directory structure and analysis of components and their relationships
+ * This provides an enhanced view of the codebase structure and relationships.
+ */
+export async function getProjectContextWithDirectoryStructureAndAnalysis(
   projectId: number | string,
   options: {
     maxSize?: number;
     includeExtensions?: string[];
     excludeDirs?: string[];
     excludeFiles?: string[];
-    specificFiles?: string[];
-    includeFull?: boolean;
-    includeDirectoryStructure?: boolean;
+    includeUtilityMethods?: boolean;
+    analyzeRelationships?: boolean;
   } = {}
 ): Promise<string> {
   const {
@@ -153,11 +249,11 @@ export async function getProjectContext(
     includeExtensions = CONTEXT.INCLUDE_EXTENSIONS,
     excludeDirs = CONTEXT.EXCLUDE_DIRS,
     excludeFiles = CONTEXT.EXCLUDE_FILES,
-    specificFiles = [],
-    includeDirectoryStructure = true,
+    includeUtilityMethods = true,
+    analyzeRelationships = true,
   } = options;
 
-  console.log(`📂 Starting context collection for project ${projectId}`);
+  console.log(`📂 Starting analysis context collection for project ${projectId}`);
   console.log(`📊 Max context size: ${maxSize} tokens`);
 
   const projectPath = getProjectPath(projectId);
@@ -166,322 +262,403 @@ export async function getProjectContext(
   let context = '';
   let totalTokens = 0;
 
-  // Track files sent to the LLM
-  const includedFiles: Array<{ path: string; tokens: number }> = [];
+  const includedFiles: Array<{ path: string; tokens: number; type: string }> = [];
   const excludedFiles: Array<{ path: string; tokens: number; reason: string }> = [];
 
-  // Generate directory structure if requested
-  let directoryStructure = '';
-  if (includeDirectoryStructure) {
-    directoryStructure = await generateDirectoryStructure(projectPath, excludeDirs);
+  try {
+    // Step 1: Generate directory structure
+    console.log(`📂 Generating directory structure...`);
+    const directoryStructure = await generateDirectoryStructure(projectPath, excludeDirs);
     const dirStructureTokens = countTokens(directoryStructure);
 
-    // Only add if there's enough room for it
-    if (dirStructureTokens * 2 < maxSize * 0.2) {
-      // Use at most 20% for both structures
+    if (dirStructureTokens < maxSize * 0.15) {
       context += directoryStructure;
-      totalTokens += dirStructureTokens * 2; // Account for both instances
-      console.log(`📂 Added directory structure (${dirStructureTokens} tokens x2)`);
+      totalTokens += dirStructureTokens;
+      console.log(`📂 Added directory structure (${dirStructureTokens} tokens)`);
     } else {
-      console.log(`⚠️ Directory structure too large (${dirStructureTokens} tokens x2), skipping`);
-    }
-  }
-
-  // If specific files are provided, only include those
-  if (specificFiles.length > 0) {
-    console.log(`🔍 Specific files mode: Including only ${specificFiles.length} requested files`);
-
-    for (const filePath of specificFiles) {
-      const fullPath = path.join(projectPath, filePath);
-      try {
-        const content = await readFile(fullPath);
-        const fileContext = `
-================
-File: ${filePath}
-================
-${content}
-`;
-        const fileTokens = countTokens(fileContext);
-
-        // Check if adding this file would exceed the max size
-        if (totalTokens + fileTokens > maxSize) {
-          console.log(`⚠️ Excluding file due to token limit: ${filePath} (${fileTokens} tokens)`);
-          excludedFiles.push({
-            path: filePath,
-            tokens: fileTokens,
-            reason: 'token limit exceeded',
-          });
-          context += `\n[Context truncated due to token limitations]\n`;
-          break;
-        }
-
-        console.log(`✅ Including file: ${filePath} (${fileTokens} tokens)`);
-        includedFiles.push({ path: filePath, tokens: fileTokens });
-        context += fileContext;
-        totalTokens += fileTokens;
-      } catch (error) {
-        console.error(`❌ Failed to read file ${filePath}:`, error);
-        excludedFiles.push({ path: filePath, tokens: 0, reason: 'read error' });
-      }
+      console.log(`⚠️ Directory structure too large (${dirStructureTokens} tokens), skipping`);
     }
 
-    // Add directory structure at the end if it was included at the beginning
-    if (directoryStructure) {
-      context += directoryStructure;
-    }
-
-    logContextSummary(includedFiles, excludedFiles, totalTokens);
-    return context;
-  }
-
-  // Otherwise, scan the project directory
-  try {
-    console.log(`🔍 Scanning project directory: ${projectPath}`);
+    // Step 2: Gather files for analysis
+    console.log(`🔍 Scanning project for files: ${projectPath}`);
     const files = await listFilesRecursively(projectPath);
     console.log(`📊 Found ${files.length} total files in project`);
 
-    // Filter files by extension and exclude directories
     const filteredFiles = files.filter(file => {
       const ext = path.extname(file);
       const fileName = path.basename(file);
 
-      // Check if file should be excluded
       if (excludeFiles.includes(fileName)) {
         excludedFiles.push({ path: file, tokens: 0, reason: 'excluded file' });
         return false;
       }
-
-      // Check if file is in an excluded directory
       if (excludeDirs.some(dir => file.includes(`/${dir}/`) || file.startsWith(dir))) {
         excludedFiles.push({ path: file, tokens: 0, reason: 'excluded directory' });
         return false;
       }
-
-      // Check if file has an included extension
       return includeExtensions.includes(ext);
     });
 
     console.log(`📊 ${filteredFiles.length} files match the extension and exclusion filters`);
 
-    // Sort filtered files to prioritize important ones
-    const sortedFiles = sortFilesByImportance(filteredFiles);
+    // Step 3: Perform detailed analysis of TypeScript code (if enabled)
+    let componentRelationships: Record<string, Relationship> = {};
+    let contextProviders: Record<string, string[]> = {};
 
-    // Process each file until we hit the token limit
-    for (const file of sortedFiles) {
-      // Skip node_modules and other unwanted paths
-      if (
-        file.includes('node_modules/') ||
-        file.includes('.git/') ||
-        file.includes('.next/') ||
-        file.includes('.vscode/')
-      ) {
-        excludedFiles.push({ path: file, tokens: 0, reason: 'excluded path' });
-        continue;
-      }
-
+    if (analyzeRelationships) {
+      console.log(`🔍 Analyzing component and function relationships...`);
       try {
-        // Read the file content
-        const fullPath = path.join(projectPath, file);
-        const content = await readFile(fullPath);
-        const relativePath = path.relative(projectPath, file);
+        const tsAnalysis = await analyzeTsWithMorph(projectPath);
+        componentRelationships = tsAnalysis.relationships;
+        contextProviders = tsAnalysis.contextProviders;
 
-        // Skip empty files
-        if (!content.trim()) {
-          excludedFiles.push({ path: relativePath, tokens: 0, reason: 'empty file' });
-          continue;
-        }
+        // Log more detailed info for troubleshooting
+        console.log(
+          `✅ Analyzed ${Object.keys(componentRelationships).length} components and functions`
+        );
 
-        // Create file context with header
-        const fileContext = `
-================
-File: ${relativePath}
-================
-${content}
-`;
-        const fileTokens = countTokens(fileContext);
+        // Log component types
+        const componentCount = Object.values(componentRelationships).filter(
+          r => r.type === 'component'
+        ).length;
+        const hookCount = Object.values(componentRelationships).filter(
+          r => r.type === 'hook'
+        ).length;
+        const functionCount = Object.values(componentRelationships).filter(
+          r => r.type === 'function'
+        ).length;
 
-        // Check if adding this file would exceed the max size
-        if (totalTokens + fileTokens > maxSize) {
-          console.log(
-            `⚠️ Excluding file due to token limit: ${relativePath} (${fileTokens} tokens)`
+        console.log(
+          `📊 Found ${componentCount} components, ${hookCount} hooks, and ${functionCount} functions`
+        );
+
+        if (componentCount === 0) {
+          console.warn(
+            '⚠️ No components found! Check project structure and analyzeTsWithMorph implementation.'
           );
-          excludedFiles.push({
-            path: relativePath,
-            tokens: fileTokens,
-            reason: 'token limit exceeded',
-          });
-          continue;
-        }
 
-        // Add file to context
-        console.log(`✅ Including file: ${relativePath} (${fileTokens} tokens)`);
-        includedFiles.push({ path: relativePath, tokens: fileTokens });
-        context += fileContext;
-        totalTokens += fileTokens;
+          // Log some paths for debugging
+          const allFilePaths = Object.values(componentRelationships).map(r => r.filePath);
+          console.log(
+            `📂 File paths analyzed: ${allFilePaths.slice(0, 10).join(', ')}${allFilePaths.length > 10 ? '...' : ''}`
+          );
+        }
       } catch (error) {
-        console.error(`❌ Failed to read file ${file}:`, error);
-        const relativePath = path.relative(projectPath, file);
-        excludedFiles.push({ path: relativePath, tokens: 0, reason: 'read error' });
+        console.error(`❌ Error analyzing TypeScript relationships:`, error);
       }
     }
 
-    // Add directory structure at the end if it was included at the beginning
-    if (directoryStructure) {
-      context += directoryStructure;
+    // Step 4: Extract utility functions (if enabled)
+    const utilityMethods: Array<{ filePath: string; signatures: string[] }> = [];
+
+    if (includeUtilityMethods) {
+      console.log(`🔍 Extracting utility method signatures...`);
+      try {
+        const utilityFiles = filteredFiles.filter(file => {
+          const relativePath = path.relative(projectPath, path.join(projectPath, file));
+          const fileName = path.basename(relativePath);
+          const firstChar = fileName.split('.')[0][0];
+          const isComponentOrHook =
+            (firstChar === firstChar.toUpperCase() && firstChar !== firstChar.toLowerCase()) ||
+            fileName.startsWith('use');
+          const isInComponentDir =
+            relativePath.includes('components/') ||
+            relativePath.includes('app/') ||
+            relativePath.includes('pages/'); // Also exclude app/pages dirs
+
+          // Keep the file ONLY if it's NOT a component/hook AND NOT in a component/app/pages directory
+          return !isComponentOrHook && !isInComponentDir;
+        });
+
+        console.log(
+          `🔬 Found ${utilityFiles.length} potential utility files for signature extraction.`
+        );
+
+        for (const file of utilityFiles) {
+          const fullPath = path.join(projectPath, file);
+          const content = await readFile(fullPath);
+          const ext = path.extname(file);
+          const methodSignatures = extractMethodSignatures(content, ext);
+
+          if (methodSignatures.length > 0) {
+            const relativePath = path.relative(projectPath, fullPath);
+            utilityMethods.push({
+              filePath: relativePath,
+              signatures: methodSignatures,
+            });
+          }
+        }
+        console.log(`✅ Extracted signatures from ${utilityMethods.length} utility files.`);
+      } catch (error) {
+        console.error(`❌ Error extracting utility methods:`, error);
+      }
     }
 
-    logContextSummary(includedFiles, excludedFiles, totalTokens);
+    // Step 5: Combine analysis into context
+    console.log(`📝 Formatting relationship graph...`);
+    let relationshipGraph = '';
+    const filteredRelationships: Record<string, Relationship> = {};
+
+    // --- Define pageEntryPoints earlier to be accessible by Page Analysis section ---
+    const pageEntryPoints = new Set<string>();
+    if (Object.keys(componentRelationships).length > 0) {
+      // --- START: Original filtering logic ---
+      const allRelationshipNames = new Set(Object.keys(componentRelationships));
+
+      // Identify page components as entry points (populate the outer pageEntryPoints set)
+      for (const [name, rel] of Object.entries(componentRelationships)) {
+        const filePath = rel.filePath || '';
+        // Add patterns for identifying pages/layouts/routes
+        if (
+          filePath.match(/^(app|pages)(\/.*)?\/(page|layout|route)\.(tsx|ts|js|jsx)$/) ||
+          filePath.match(/^(app|pages)\/[^\/]+\.(tsx|ts|js|jsx)$/) || // e.g., app/not-found.tsx
+          filePath.match(/^app\/.*$/) || // Any file in app directory could be a route component
+          filePath.match(/^pages\/.*$/) || // Any file in pages directory could be a page
+          filePath.includes('/page.') || // Files named page.tsx in any directory
+          filePath.includes('/layout.') || // Files named layout.tsx in any directory
+          /\/(404|500|index)\.(tsx|ts|js|jsx)$/.test(filePath) // Common page names
+        ) {
+          pageEntryPoints.add(name);
+        }
+      }
+      console.log(
+        `🔍 Found ${pageEntryPoints.size} potential page entry points for relationship graph.`
+      );
+
+      // Perform BFS/DFS traversal to find reachable components
+      const reachable = new Set<string>();
+      const queue = Array.from(pageEntryPoints);
+      pageEntryPoints.forEach(p => reachable.add(p)); // Add initial entry points
+
+      while (queue.length > 0) {
+        const currentName = queue.shift();
+        if (!currentName) continue;
+
+        const rel = componentRelationships[currentName];
+        if (!rel) continue;
+
+        const dependencies = [...(rel.uses || []), ...(rel.hooks || [])];
+        for (const depName of dependencies) {
+          // Only consider dependencies that are part of the analyzed relationships
+          if (allRelationshipNames.has(depName) && !reachable.has(depName)) {
+            reachable.add(depName);
+            queue.push(depName);
+          }
+        }
+      }
+      console.log(
+        `📊 Found ${reachable.size} components/functions reachable from page entry points.`
+      );
+
+      // Build the filtered relationship object
+      for (const name of reachable) {
+        const originalRel = componentRelationships[name];
+        if (originalRel) {
+          filteredRelationships[name] = {
+            ...originalRel,
+            // Filter 'usedBy' to only include reachable components
+            usedBy: (originalRel.usedBy || []).filter(user => reachable.has(user)),
+          };
+        }
+      }
+      // --- END: Original filtering logic ---
+
+      relationshipGraph = `
+================================================================
+Component & Function Relationships (Reachable from Pages)
+================================================================
+`;
+
+      // Format relationships as a text list (using filteredRelationships)
+      let graphText = '';
+      // Iterate over the filtered map instead of the original
+      for (const [name, rel] of Object.entries(filteredRelationships)) {
+        // Skip if the filtered component has no connections left after filtering
+        if (
+          (rel.uses?.length ?? 0) === 0 &&
+          (rel.usedBy?.length ?? 0) === 0 &&
+          (rel.hooks?.length ?? 0) === 0 &&
+          (rel.contexts?.length ?? 0) === 0 &&
+          !pageEntryPoints.has(name) // Keep entry points even if isolated
+        ) {
+          continue;
+        }
+
+        // Clean the file path to remove project ID
+        const cleanFilePath = rel.filePath.replace(/^\d+\//, '');
+
+        let entry = `\n${name} (${rel.type}, ${cleanFilePath})\n`;
+        if (rel.uses && rel.uses.length > 0) {
+          entry += `  uses: ${rel.uses.join(', ')}\n`;
+        }
+        // Use the already filtered usedBy list
+        if (rel.usedBy && rel.usedBy.length > 0) {
+          entry += `  usedBy: ${rel.usedBy.join(', ')}\n`;
+        }
+        if (rel.hooks && rel.hooks.length > 0) {
+          entry += `  hooks: ${rel.hooks.join(', ')}\n`;
+        }
+        if (rel.contexts && rel.contexts.length > 0) {
+          entry += `  contexts: ${rel.contexts.join(', ')}\n`;
+        }
+        graphText += entry;
+      }
+
+      const graphTokens = countTokens(graphText);
+
+      if (totalTokens + graphTokens + 80 < maxSize * 0.8) {
+        // Recalculate based on text format
+        relationshipGraph += graphText + '\n'; // Add the generated text
+        totalTokens += graphTokens + 80; // Add overhead for section header
+        // Update logging to reflect filtered graph
+        includedFiles.push({
+          path: 'filtered-relationship-graph',
+          tokens: graphTokens,
+          type: 'analysis',
+        });
+        console.log(`✅ Added filtered relationship graph (${graphTokens} tokens)`);
+      } else {
+        console.log(`⚠️ Filtered relationship graph too large (${graphTokens} tokens), skipping`);
+        relationshipGraph += '[Filtered relationships excluded due to token limit constraints]\n';
+        totalTokens += 60; // Approximate overhead for the exclusion message
+      }
+    }
+    // --- pageEntryPoints is now defined and populated, ready for Page Analysis ---
+
+    if (relationshipGraph.trim() !== '') {
+      context += relationshipGraph;
+    }
+
+    // --- START: Add Page Analysis Section ---
+    console.log(`📝 Formatting page analysis...`);
+    let pageAnalysisSection = '';
+
+    if (pageEntryPoints.size > 0 && Object.keys(componentRelationships).length > 0) {
+      pageAnalysisSection = `
+================================================================
+Page Analysis (Direct Dependencies)
+================================================================
+`;
+      let pageAnalysisText = '';
+
+      for (const pageName of pageEntryPoints) {
+        const rel = componentRelationships[pageName];
+        if (!rel) continue;
+
+        const directDeps = [...(rel.uses || []), ...(rel.hooks || [])];
+
+        // Clean the file path to remove project ID
+        const cleanFilePath = rel.filePath.replace(/^\d+\//, '');
+
+        // Only include pages that actually use other components/hooks
+        if (directDeps.length > 0) {
+          let entry = `\nPage: ${pageName} (${cleanFilePath})\n`;
+          entry += `  Uses Components/Hooks: ${directDeps.join(', ')}\n`;
+          pageAnalysisText += entry;
+        }
+      }
+
+      const pageAnalysisTokens = countTokens(pageAnalysisText);
+
+      // Check token limit (leaving some room for utility methods)
+      if (totalTokens + pageAnalysisTokens + 80 < maxSize * 0.95) {
+        pageAnalysisSection += pageAnalysisText + '\n';
+        totalTokens += pageAnalysisTokens + 80; // Add overhead for section header
+        includedFiles.push({
+          path: 'page-analysis',
+          tokens: pageAnalysisTokens,
+          type: 'analysis',
+        });
+        console.log(`✅ Added page analysis section (${pageAnalysisTokens} tokens)`);
+      } else {
+        console.log(`⚠️ Page analysis section too large (${pageAnalysisTokens} tokens), skipping`);
+        pageAnalysisSection += '[Page analysis excluded due to token limit constraints]\n';
+        totalTokens += 60; // Approximate overhead for the exclusion message
+      }
+    }
+
+    if (pageAnalysisSection.trim() !== '') {
+      context += pageAnalysisSection;
+    }
+    // --- END: Add Page Analysis Section ---
+
+    // Format Context Providers section
+    console.log(`📝 Formatting context providers...`);
+    let contextProviderSection = '';
+
+    if (Object.keys(contextProviders).length > 0) {
+      contextProviderSection = `
+================================================================
+Context Providers
+================================================================
+`;
+      for (const [contextName, providers] of Object.entries(contextProviders)) {
+        const providerInfo = `${contextName}:\n  Providers: ${providers.join(', ')}\n`;
+        const providerTokens = countTokens(providerInfo);
+        if (totalTokens + providerTokens < maxSize * 0.9) {
+          contextProviderSection += providerInfo;
+          totalTokens += providerTokens;
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (contextProviderSection.trim() !== '') {
+      context += contextProviderSection;
+    }
+
+    // Format utility methods
+    console.log(`📝 Formatting utility methods...`);
+    let utilityMethodsSection = '';
+
+    if (utilityMethods.length > 0) {
+      utilityMethodsSection = `
+================================================================
+Utility Methods
+================================================================
+`;
+      for (const utilityFile of utilityMethods) {
+        const fileSection = `
+File: ${utilityFile.filePath}
+${utilityFile.signatures.join('\n\n')}
+`;
+        const sectionTokens = countTokens(fileSection);
+        if (totalTokens + sectionTokens < maxSize) {
+          utilityMethodsSection += fileSection;
+          totalTokens += sectionTokens;
+          includedFiles.push({
+            path: utilityFile.filePath,
+            tokens: sectionTokens,
+            type: 'utility',
+          });
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (utilityMethodsSection.trim() !== '') {
+      context += utilityMethodsSection;
+    }
+
+    // Log summary information
+    console.log(`
+=== Analysis Context Collection Summary ===
+Total token count: ${totalTokens}
+Included ${includedFiles.length} analysis sections
+`);
+    const fileTypes = [...new Set(includedFiles.map(file => file.type))];
+    fileTypes.forEach(type => {
+      const typeFiles = includedFiles.filter(file => file.type === type);
+      console.log(
+        `- ${type}: ${typeFiles.length} sections (${typeFiles.reduce((sum, file) => sum + file.tokens, 0)} tokens)`
+      );
+    });
+
     return context;
   } catch (error) {
-    console.error('Error getting project context:', error);
-    return 'Error generating project context';
-  }
-}
-
-/**
- * Get a lean version of project context that only includes directory structure
- */
-export async function getProjectContextOnlyDirectoryStructure(
-  projectId: number | string,
-  options: {
-    maxSize?: number;
-    excludeDirs?: string[];
-  } = {}
-): Promise<string> {
-  const { maxSize = CONTEXT.MAX_CONTEXT_SIZE, excludeDirs = CONTEXT.EXCLUDE_DIRS } = options;
-
-  console.log(`📂 Starting lean context collection for project ${projectId}`);
-  console.log(`📊 Max context size: ${maxSize} tokens`);
-
-  const projectPath = getProjectPath(projectId);
-  let context = '';
-  let totalTokens = 0;
-
-  // Generate directory structure
-  // Pass the excludeDirs parameter to use in filtering
-  const directoryStructure = await generateDirectoryStructure(projectPath, excludeDirs);
-  const dirStructureTokens = countTokens(directoryStructure);
-
-  if (dirStructureTokens > maxSize) {
-    console.log(`⚠️ Directory structure too large (${dirStructureTokens} tokens), truncating`);
-    context = `[Directory structure truncated due to token limitations]\n`;
-  } else {
-    context = directoryStructure;
-    totalTokens = dirStructureTokens;
-    console.log(`📂 Added directory structure (${dirStructureTokens} tokens)`);
-  }
-
-  console.log(`\n📊 LEAN CONTEXT COLLECTION SUMMARY:`);
-  console.log(`✅ Total tokens: ${totalTokens}`);
-  console.log(`📂 Excluded directories: ${excludeDirs.join(', ')}`);
-
-  return context;
-}
-
-/**
- * Log a summary of the context collection
- */
-function logContextSummary(
-  includedFiles: Array<{ path: string; tokens: number }>,
-  excludedFiles: Array<{ path: string; tokens: number; reason: string }>,
-  totalTokens: number
-): void {
-  console.log(`
-=== Context Collection Summary ===
-Total token count: ${totalTokens}
-Included ${includedFiles.length} files
-Excluded ${excludedFiles.length} files
-`);
-
-  // Log included files
-  console.log('Included files:');
-  includedFiles.forEach(file => {
-    console.log(`- ${file.path} (${file.tokens} tokens)`);
-  });
-
-  // Log excluded files by reason
-  console.log('\nExcluded files by reason:');
-  const reasons = [...new Set(excludedFiles.map(file => file.reason))];
-  reasons.forEach(reason => {
-    const count = excludedFiles.filter(file => file.reason === reason).length;
-    console.log(`- ${reason}: ${count} files`);
-  });
-}
-
-/**
- * Sort files by importance based on file path and extension
- */
-function sortFilesByImportance(files: string[]): string[] {
-  // List of important file patterns (most important first)
-  const importantPatterns = [
-    /package\.json$/,
-    /tsconfig\.json$/,
-    /next\.config\.(js|ts)$/,
-    /app\/page\.tsx$/,
-    /app\/layout\.tsx$/,
-    /app\/routes\.tsx$/,
-    /app\/api\/.+\.ts$/,
-    /\.env$/,
-    /\.env\.local$/,
-    /README\.md$/,
-    /app\/.+\.tsx$/,
-    /components\/.+\.tsx$/,
-    /lib\/.+\.ts$/,
-    /utils\/.+\.ts$/,
-    /hooks\/.+\.ts$/,
-  ];
-
-  // Custom sorting function
-  return [...files].sort((a, b) => {
-    // Find the first pattern that matches each file
-    const aImportance = importantPatterns.findIndex(pattern => pattern.test(a));
-    const bImportance = importantPatterns.findIndex(pattern => pattern.test(b));
-
-    // If both match patterns, sort by pattern importance
-    if (aImportance !== -1 && bImportance !== -1) {
-      return aImportance - bImportance;
-    }
-
-    // If only one matches a pattern, prioritize it
-    if (aImportance !== -1) return -1;
-    if (bImportance !== -1) return 1;
-
-    // Otherwise sort alphabetically
-    return a.localeCompare(b);
-  });
-}
-
-/**
- * Get context for specific files
- */
-export async function getFilesContext(
-  projectId: number | string,
-  filePaths: string[]
-): Promise<string> {
-  return getProjectContext(projectId, {
-    specificFiles: filePaths,
-    includeDirectoryStructure: true,
-  });
-}
-
-/**
- * Get context for a directory
- */
-export async function getDirectoryContext(
-  projectId: number | string,
-  dirPath: string
-): Promise<string> {
-  const projectPath = getProjectPath(projectId);
-  const fullDirPath = path.join(projectPath, dirPath);
-
-  try {
-    const files = await listFilesRecursively(fullDirPath);
-    const relativePaths = files.map(file => path.relative(projectPath, file));
-    return getProjectContext(projectId, {
-      specificFiles: relativePaths,
-    });
-  } catch (error) {
-    console.error(`Error getting directory context for ${dirPath}:`, error);
-    return `Error getting directory context for ${dirPath}`;
+    console.error('Error generating analysis project context:', error);
+    return 'Error generating analysis project context';
   }
 }
