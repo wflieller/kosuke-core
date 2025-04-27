@@ -1,109 +1,24 @@
 'use client';
 
-import { useState, useEffect, createContext } from 'react';
-import { Palette, Sun, Moon, TextQuote } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Palette, Sun, Moon, TextQuote, Wand2 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import ColorCard from '../brand/color-card';
-import ColorCardSkeleton from '../brand/color-card-skeleton';
+import { Button } from '@/components/ui/button';
+import { useToast } from '@/hooks/use-toast';
+import ColorCard from './color-card';
+import ColorCardSkeleton from './color-card-skeleton';
 import FontCard from './font-card';
 import FontCardSkeleton from './font-card-skeleton';
-import { useToast } from '@/hooks/use-toast';
+import ColorPaletteModal from './color-palette-modal';
+import KeywordsModal from './keywords-modal';
+import { ThemePreviewProvider } from './theme-context';
+import { convertToHsl, groupColorsByCategory, getCategoryTitle } from './utils/color-utils';
+import { type CssVariable, type ThemeMode } from './types';
 import { type FontInfo } from '@/lib/font-parser';
-
-// Define theme modes
-type ThemeMode = 'light' | 'dark';
-
-// Create a context for the theme preview
-const ThemePreviewContext = createContext<{
-  previewMode: ThemeMode;
-  togglePreviewMode: () => void;
-}>({
-  previewMode: 'dark',
-  togglePreviewMode: () => {},
-});
-
-// Color variable types to match API response
-interface CssVariable {
-  name: string;
-  lightValue: string;
-  darkValue?: string;
-  scope: 'root' | 'dark' | 'light' | 'unknown';
-}
 
 interface BrandGuidelinesProps {
   projectId: number;
-}
-
-/**
- * Convert any color format to HSL string (format: "h s% l%")
- */
-function convertToHsl(color: string): string {
-  try {
-    // If already in HSL format "h s% l%", return as is
-    if (/^\d+\s+\d+%\s+\d+%$/.test(color)) {
-      return color;
-    }
-    
-    // If it's already in hsl() format, extract the values
-    const hslMatch = color.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
-    if (hslMatch) {
-      return `${hslMatch[1]} ${hslMatch[2]}% ${hslMatch[3]}%`;
-    }
-    
-    // For hex colors and other formats, we need to convert
-    const temp = document.createElement('div');
-    temp.style.color = color;
-    document.body.appendChild(temp);
-    const computedColor = getComputedStyle(temp).color;
-    document.body.removeChild(temp);
-    
-    // Parse RGB values
-    const rgbMatch = computedColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-    if (rgbMatch) {
-      // Convert RGB to HSL
-      const r = parseInt(rgbMatch[1]) / 255;
-      const g = parseInt(rgbMatch[2]) / 255;
-      const b = parseInt(rgbMatch[3]) / 255;
-      
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const l = (max + min) / 2;
-      
-      let h = 0;
-      let s = 0;
-      
-      if (max !== min) {
-        const d = max - min;
-        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-        
-        switch (max) {
-          case r:
-            h = (g - b) / d + (g < b ? 6 : 0);
-            break;
-          case g:
-            h = (b - r) / d + 2;
-            break;
-          case b:
-            h = (r - g) / d + 4;
-            break;
-        }
-        
-        h = Math.round(h * 60);
-      }
-      
-      s = Math.round(s * 100);
-      const lightness = Math.round(l * 100);
-      
-      return `${h} ${s}% ${lightness}%`;
-    }
-    
-    // If conversion failed, return the original color
-    return color;
-  } catch (error) {
-    console.error('Error converting color to HSL:', error);
-    return color;
-  }
 }
 
 export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
@@ -120,6 +35,17 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
   const [isFontsLoading, setIsFontsLoading] = useState(true);
   const [fontsError, setFontsError] = useState<string | null>(null);
   
+  // Add state for palette generation
+  const [isGeneratingPalette, setIsGeneratingPalette] = useState(false);
+  const [isPalettePreviewOpen, setIsPalettePreviewOpen] = useState(false);
+  const [generatedPalette, setGeneratedPalette] = useState<CssVariable[]>([]);
+  
+  // Add state for keywords modal
+  const [isKeywordsModalOpen, setIsKeywordsModalOpen] = useState(false);
+  
+  // Add state for active tab
+  const [activeTab, setActiveTab] = useState('colors');
+
   const togglePreviewMode = () => {
     setPreviewMode(prev => prev === 'dark' ? 'light' : 'dark');
   };
@@ -231,6 +157,97 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
     }
   };
   
+  // Update function to first show keywords modal
+  const handleGenerateColorPalette = () => {
+    setIsKeywordsModalOpen(true);
+  };
+  
+  // Add function to generate color palette with keywords
+  const generateColorPaletteWithKeywords = async (keywords: string) => {
+    setIsKeywordsModalOpen(false);
+    setIsGeneratingPalette(true);
+    // Show the palette modal immediately with the loading state
+    setIsPalettePreviewOpen(true);
+    
+    try {
+      const response = await fetch(`/api/projects/${projectId}/branding/generate-palette`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          keywords: keywords.trim()
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to generate color palette');
+      }
+      
+      // Successfully generated the palette
+      const data = await response.json();
+      
+      if (data.success && data.colors) {
+        // Save the generated palette
+        setGeneratedPalette(data.colors);
+      } else {
+        throw new Error('Failed to generate a valid color palette');
+      }
+      
+    } catch (err) {
+      console.error('Error generating color palette:', err);
+      toast({
+        title: "Generation failed",
+        description: err instanceof Error ? err.message : "Failed to generate color palette",
+        variant: "destructive",
+      });
+      // Close the modal on error
+      setIsPalettePreviewOpen(false);
+    } finally {
+      setIsGeneratingPalette(false);
+    }
+  };
+  
+  // Function to apply the generated palette
+  const applyGeneratedPalette = async () => {
+    try {
+      // Modal is already closed at this point from the ColorPaletteModal component
+      
+      const response = await fetch(`/api/projects/${projectId}/branding/generate-palette?apply=true`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          colors: generatedPalette
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to apply color palette');
+      }
+      
+      // Show success message
+      toast({
+        title: "Palette applied",
+        description: "New color palette has been applied to your project.",
+      });
+      
+      // Refresh the colors
+      fetchCssVariables();
+      
+    } catch (err) {
+      console.error('Error applying color palette:', err);
+      toast({
+        title: "Application failed",
+        description: err instanceof Error ? err.message : "Failed to apply color palette",
+        variant: "destructive",
+      });
+    }
+  };
+  
   // Fetch data on component mount
   useEffect(() => {
     fetchCssVariables();
@@ -238,66 +255,7 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
   }, [projectId]);
   
   // Group colors into categories for display
-  const groupedColors = (() => {
-    const grouped: Record<string, CssVariable[]> = {};
-    
-    // Predefined color categories (in display order)
-    const categories = [
-      'background',
-      'foreground',
-      'primary',
-      'secondary',
-      'accent',
-      'muted',
-      'card',
-      'popover',
-      'border',
-      'destructive',
-      'sidebar',
-      'chart',
-      'other'
-    ];
-    
-    // Initialize categories
-    categories.forEach(category => {
-      grouped[category] = [];
-    });
-    
-    // Sort colors into categories
-    colorVariables.forEach(variable => {
-      const name = variable.name.replace(/^--/, '');
-      let assigned = false;
-      
-      // Try to match to a category
-      for (const category of categories) {
-        if (name === category || name.startsWith(`${category}-`) || name.includes(category)) {
-          grouped[category].push(variable);
-          assigned = true;
-          break;
-        }
-      }
-      
-      // If no category matched, put in 'other'
-      if (!assigned) {
-        grouped['other'].push(variable);
-      }
-    });
-    
-    // Remove empty categories
-    const result: Record<string, CssVariable[]> = {};
-    for (const category of categories) {
-      if (grouped[category].length > 0) {
-        result[category] = grouped[category];
-      }
-    }
-    
-    return result;
-  })();
-  
-  const getCategoryTitle = (category: string) => {
-    if (category === 'other') return 'Other Variables';
-    return `${category.charAt(0).toUpperCase() + category.slice(1)} Colors`;
-  };
+  const groupedColors = groupColorsByCategory<CssVariable>(colorVariables);
 
   // Get current color value based on theme mode
   const getCurrentColorValue = (color: CssVariable) => {
@@ -338,34 +296,58 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
       Object.entries(grouped).filter(([, fonts]) => fonts.length > 0)
     );
   })();
+
+  // Render floating loading indicator (removed since we now use the modal)
+  const renderGeneratingIndicator = () => {
+    return null; // No longer needed as we're showing the modal instead
+  };
   
   return (
-    <ThemePreviewContext.Provider value={{ previewMode, togglePreviewMode }}>
-      <div className={`flex flex-col h-full overflow-auto p-6 space-y-6 ${previewMode === 'dark' ? 'dark' : ''}`}>
+    <ThemePreviewProvider initialMode={previewMode}>
+      <div className="flex flex-col h-full p-6 space-y-6">
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2">
             <Palette className="h-5 w-5 text-primary" />
             <h1 className="text-2xl font-semibold">Brand Guidelines</h1>
           </div>
           
-          <div className="flex items-center gap-2 border border-border px-3 py-1.5 rounded-md">
-            <Sun className="h-4 w-4 text-muted-foreground" />
-            <Switch 
-              checked={previewMode === 'dark'}
-              onCheckedChange={togglePreviewMode}
-              aria-label="Toggle color theme preview mode"
-            />
-            <Moon className="h-4 w-4 text-muted-foreground" />
+          <div className="flex items-center gap-3">
+            {/* Generate Palette Button */}
+            <Button 
+              variant="outline" 
+              size="sm" 
+              className="gap-1.5 h-9"
+              onClick={handleGenerateColorPalette}
+            >
+              <Wand2 className="h-4 w-4" />
+              Generate Color Palette
+            </Button>
+            
+            {/* Theme Switcher */}
+            <div className="flex items-center gap-2 border border-border px-3 py-1.5 rounded-md">
+              <Sun className="h-4 w-4 text-muted-foreground" />
+              <Switch 
+                checked={previewMode === 'dark'}
+                onCheckedChange={togglePreviewMode}
+                aria-label="Toggle color theme preview mode"
+              />
+              <Moon className="h-4 w-4 text-muted-foreground" />
+            </div>
           </div>
         </div>
         
-        <Tabs defaultValue="colors" className="w-full">
+        <Tabs 
+          defaultValue="colors" 
+          className="w-full"
+          value={activeTab}
+          onValueChange={setActiveTab}
+        >
           <TabsList>
             <TabsTrigger value="colors">Colors</TabsTrigger>
             <TabsTrigger value="fonts">Typography</TabsTrigger>
           </TabsList>
           
-          <TabsContent value="colors" className="space-y-6 pt-6">
+          <TabsContent value="colors" className="space-y-6 pt-6 pb-12">
             {error && (
               <div className="p-4 bg-destructive/10 border border-destructive text-destructive rounded-md">
                 {error}
@@ -373,7 +355,7 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
             )}
             
             {isLoading ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4 gap-6">
                 {Array.from({ length: 9 }).map((_, i) => (
                   <ColorCardSkeleton key={i} />
                 ))}
@@ -390,9 +372,9 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
               ) : (
                 // Display each category
                 Object.entries(groupedColors).map(([category, colors]) => (
-                  <div key={category} className="space-y-4">
+                  <div key={category} className="space-y-4 mb-10">
                     <h2 className="text-xl font-medium">{getCategoryTitle(category)}</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4 gap-6">
                       {colors.map(color => (
                         <ColorCard
                           key={color.name + (color.scope || '')}
@@ -411,7 +393,7 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
             )}
           </TabsContent>
           
-          <TabsContent value="fonts" className="space-y-6 pt-6">
+          <TabsContent value="fonts" className="space-y-6 pt-6 pb-12">
             {fontsError && (
               <div className="p-4 bg-destructive/10 border border-destructive text-destructive rounded-md">
                 {fontsError}
@@ -434,8 +416,8 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
                   </p>
                 </div>
               ) : (
-                Object.entries(groupedFonts).map(([category, fonts]) => (
-                  <div key={category} className="space-y-4">
+                Object.entries(groupedFonts).map(([category, fonts], index, arr) => (
+                  <div key={category} className={`space-y-4 ${index === arr.length - 1 ? 'mb-6' : 'mb-10'}`}>
                     <h2 className="text-xl font-medium capitalize">{category} Fonts</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {fonts.map(font => (
@@ -448,7 +430,28 @@ export default function BrandGuidelines({ projectId }: BrandGuidelinesProps) {
             )}
           </TabsContent>
         </Tabs>
+        
+        {/* Keywords Modal */}
+        <KeywordsModal 
+          isOpen={isKeywordsModalOpen}
+          onOpenChange={setIsKeywordsModalOpen}
+          onSubmit={generateColorPaletteWithKeywords}
+          isGenerating={isGeneratingPalette}
+        />
+        
+        {/* Color Palette Preview Modal */}
+        <ColorPaletteModal
+          isOpen={isPalettePreviewOpen}
+          onOpenChange={setIsPalettePreviewOpen}
+          palette={generatedPalette}
+          isGenerating={isGeneratingPalette}
+          onRegenerate={handleGenerateColorPalette}
+          onApply={applyGeneratedPalette}
+        />
+
+        {/* Floating loading indicator that stays visible across tabs */}
+        {renderGeneratingIndicator()}
       </div>
-    </ThemePreviewContext.Provider>
+    </ThemePreviewProvider>
   );
 } 
