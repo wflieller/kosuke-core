@@ -1,69 +1,66 @@
-FROM node:20-alpine AS base
+# syntax=docker/dockerfile:1.4
+FROM node:20-slim AS base
 
 # Install dependencies only when needed
 FROM base AS deps
-RUN apk add --no-cache libc6-compat
+
 WORKDIR /app
 
-# Copy package management files
+# Install dependencies based on the preferred package manager
 COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm ci
+# Use mount cache for npm
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
 
-# Copy dependencies from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/package.json ./package.json
 
-# Copy source files
-COPY . .
+# Copy only the necessary files for the build
+COPY next.config.* .
+COPY tsconfig.json .
+COPY tailwind.config.* .
+COPY postcss.config.* .
+COPY public ./public
+COPY app ./app
+COPY components ./components
+COPY lib ./lib
 
-# Disable telemetry during the build
+# Enable Turbo build
 ENV NEXT_TELEMETRY_DISABLED 1
-
-# Set memory limit and enable output traces
-ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV NEXT_STANDALONE=true
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV TURBO_REMOTE_ONLY=true
 
-# Enable Next.js build cache
-RUN mkdir -p /app/.next/cache
-VOLUME /app/.next/cache
-
-# Build Next.js with production optimization
-RUN npm run build
+# Use BuildKit cache mount for Next.js
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 
 # Production image, copy all the files and run next
 FROM base AS runner
 WORKDIR /app
 
-# Set production environment
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
 
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN \
+    groupadd --system --gid 1001 nodejs && \
+    useradd --system --uid 1001 --gid nodejs nextjs && \
+    mkdir .next && \
+    chown nextjs:nodejs .next
 
-# Copy necessary files
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.js ./
-COPY --from=builder /app/package.json ./package.json
-
-# Create .next directory and set permissions
-RUN mkdir .next && chown nextjs:nodejs .next
-
-# Copy standalone build and static files
+# Copy only the necessary files
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/package.json ./package.json
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Switch to non-root user
 USER nextjs
 
-# Set server configuration
 ENV PORT 3000
 ENV HOSTNAME "0.0.0.0"
 
