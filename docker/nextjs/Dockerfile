@@ -30,9 +30,10 @@ COPY app ./app
 COPY components ./components
 COPY lib ./lib
 COPY hooks ./hooks
+COPY .env* ./
 
 # Enable Turbo build
-ENV NEXT_TELEMETRY_DISABLED 1
+ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_STANDALONE=true
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV TURBO_REMOTE_ONLY=true
@@ -45,8 +46,8 @@ RUN --mount=type=cache,target=/app/.next/cache \
 FROM base AS runner
 WORKDIR /app
 
-ENV NODE_ENV production
-ENV NEXT_TELEMETRY_DISABLED 1
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN \
     groupadd --system --gid 1001 nodejs && \
@@ -59,11 +60,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/package.json ./package.json
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/.env* ./
 
 USER nextjs
 
-ENV PORT 3000
-ENV HOSTNAME "0.0.0.0"
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 
 EXPOSE 3000
 
