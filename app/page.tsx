@@ -7,8 +7,6 @@ export default async function Home() {
   if (user) {
     redirect('/projects');
   } else {
-    // Redirect to the home page in the logged-out route group
-    // This will be handled by the proper (logged-out)/home/page.tsx
-    redirect('/home');
+    redirect('/waitlist');
   }
 }

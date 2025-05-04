@@ -50,6 +50,13 @@
       "when": 1744541306807,
       "tag": "0006_absurd_goblin_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1746350680090,
+      "tag": "0007_giant_ultron",
+      "breakpoints": true
     }
   ]
 }
