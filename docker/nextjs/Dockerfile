@@ -6,13 +6,10 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 # Copy package management files
-COPY package.json pnpm-lock.yaml* ./
-
-# Install pnpm
-RUN npm install -g pnpm
+COPY package.json package-lock.json ./
 
 # Install dependencies
-RUN pnpm install --frozen-lockfile
+RUN npm ci
 
 # Rebuild the source code only when needed
 FROM base AS builder
@@ -33,7 +30,7 @@ ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV NEXT_STANDALONE=true
 
 # Build Next.js with production optimization
-RUN pnpm build
+RUN npm run build
 
 # Production image, copy all the files and run next
 FROM base AS runner
