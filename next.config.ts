@@ -2,6 +2,7 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['dockerode'],
+  output: 'standalone',
   experimental: {
     ppr: true,
     externalDir: true,
