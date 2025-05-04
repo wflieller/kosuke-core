@@ -25,6 +25,7 @@ COPY next.config.* .
 COPY tsconfig.json .
 COPY tailwind.config.* .
 COPY postcss.config.* .
+COPY drizzle.config.* .
 COPY public ./public
 COPY app ./app
 COPY components ./components
@@ -62,6 +63,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/.env* ./
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/drizzle.config.* ./
 
 USER nextjs
 
