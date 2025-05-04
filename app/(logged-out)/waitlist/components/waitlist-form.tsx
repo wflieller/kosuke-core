@@ -39,8 +39,8 @@ export function WaitlistForm() {
   };
 
   return (
-    <div className="space-y-4">
-      <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
+    <div className="space-y-3">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-2 sm:flex-row">
         <Input
           type="email"
           placeholder="Enter your email"
@@ -49,14 +49,17 @@ export function WaitlistForm() {
           required
           className="flex-1"
           disabled={isSubmitting}
+          aria-label="Email for waitlist"
         />
-        <Button type="submit" disabled={isSubmitting}>
+        <Button type="submit" disabled={isSubmitting} className="sm:w-auto">
           {isSubmitting ? 'Joining...' : 'Join waitlist'}
         </Button>
       </form>
 
-      {message && <p className="text-sm text-green-600">{message}</p>}
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      <div className="h-4">
+        {message && <p className="text-sm text-green-600 dark:text-green-500">{message}</p>}
+        {error && <p className="text-sm text-destructive">{error}</p>}
+      </div>
     </div>
   );
 }
