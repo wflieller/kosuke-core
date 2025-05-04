@@ -30,6 +30,8 @@ services:
       - .env
     ports:
       - "3001:3000"
+    volumes:
+      - next_build_cache:/app/.next/cache
     depends_on:
       - postgres
       - minio
@@ -38,3 +40,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  next_build_cache:

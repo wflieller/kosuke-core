@@ -29,6 +29,10 @@ ENV NEXT_TELEMETRY_DISABLED 1
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 ENV NEXT_STANDALONE=true
 
+# Enable Next.js build cache
+RUN mkdir -p /app/.next/cache
+VOLUME /app/.next/cache
+
 # Build Next.js with production optimization
 RUN npm run build
 
