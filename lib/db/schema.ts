@@ -24,6 +24,15 @@ export const users = pgTable('users', {
   deletedAt: timestamp('deleted_at'),
 });
 
+export const waitlistEntries = pgTable('waitlist_entries', {
+  id: serial('id').primaryKey(),
+  email: varchar('email', { length: 255 }).notNull().unique(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  status: varchar('status', { length: 20 }).notNull().default('pending'), // 'pending', 'invited', 'registered'
+  invitedAt: timestamp('invited_at'),
+  registeredAt: timestamp('registered_at'),
+});
+
 export const activityLogs = pgTable('activity_logs', {
   id: serial('id').primaryKey(),
   userId: integer('user_id').references(() => users.id),
@@ -216,3 +225,6 @@ export type Subscription = typeof subscriptions.$inferSelect;
 export type NewSubscription = typeof subscriptions.$inferInsert;
 export type Action = typeof actions.$inferSelect;
 export type NewAction = typeof actions.$inferInsert;
+
+export type WaitlistEntry = typeof waitlistEntries.$inferSelect;
+export type NewWaitlistEntry = typeof waitlistEntries.$inferInsert;

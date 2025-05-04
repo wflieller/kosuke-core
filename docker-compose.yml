@@ -20,6 +20,20 @@ services:
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
+  
+  nextjs:
+    build:
+      context: .
+      dockerfile: docker/nextjs/Dockerfile
+    container_name: next_saas_starter_nextjs
+    env_file:
+      - .env
+    ports:
+      - "3001:3000"
+    depends_on:
+      - postgres
+      - minio
+    restart: unless-stopped
 
 volumes:
   postgres_data:
