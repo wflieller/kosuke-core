@@ -29,6 +29,7 @@ COPY public ./public
 COPY app ./app
 COPY components ./components
 COPY lib ./lib
+COPY hooks ./hooks
 
 # Enable Turbo build
 ENV NEXT_TELEMETRY_DISABLED 1
