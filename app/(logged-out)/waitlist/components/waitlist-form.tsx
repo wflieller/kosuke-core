@@ -47,7 +47,6 @@ export function WaitlistForm() {
           value={email}
           onChange={e => setEmail(e.target.value)}
           required
-          className="flex-1"
           disabled={isSubmitting}
           aria-label="Email for waitlist"
         />
