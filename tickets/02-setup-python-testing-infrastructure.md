@@ -31,7 +31,7 @@ name = "kosuke-agent"
 version = "1.0.0"
 description = "AI coding agent microservice for Kosuke platform"
 authors = [{name = "Kosuke Team"}]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.104.1",
     "uvicorn==0.24.0",
@@ -90,7 +90,7 @@ exclude_lines = [
 
 # ==== mypy ====
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 check_untyped_defs = true
 ignore_missing_imports = true
 warn_unused_ignores = true
@@ -106,7 +106,7 @@ disallow_incomplete_defs = true
 # ==== ruff ====
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 exclude = [
     ".venv",
     "venv",
@@ -194,10 +194,8 @@ def mock_project_id():
 def mock_env_vars():
     """Sample environment variables for testing"""
     return {
-        "CLERK_PUBLISHABLE_KEY": "pk_test_example",
         "CLERK_SECRET_KEY": "sk_test_example",
-        "DATABASE_URL": "postgresql://test:test@localhost:5432/test_db",
-        "NEXT_PUBLIC_APP_URL": "http://localhost:3000"
+        "DATABASE_URL": "postgresql://test:test@localhost:5432/test_db"
     }
 
 
