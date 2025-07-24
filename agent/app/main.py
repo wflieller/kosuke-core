@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.endpoints import chat, health
+from app.api.routes import chat, health
 
 app = FastAPI(
     title="Agentic Coding Pipeline",
