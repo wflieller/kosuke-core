@@ -1,12 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import chat, health
 
-app = FastAPI(
-    title="Agentic Coding Pipeline",
-    description="AI-powered code generation microservice",
-    version="1.0.0"
-)
+from app.api.routes import chat
+from app.api.routes import health
+
+app = FastAPI(title="Agentic Coding Pipeline", description="AI-powered code generation microservice", version="1.0.0")
 
 # CORS middleware
 app.add_middleware(
@@ -26,4 +24,6 @@ app.include_router(health.router, tags=["root"])
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True) 
+
+    # Only bind to all interfaces in development
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
