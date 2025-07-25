@@ -61,7 +61,7 @@ export async function createProject(prompt: string, name?: string) {
     try {
       // Proxy start request to Python agent
       const agentUrl = process.env.AGENT_SERVICE_URL || 'http://localhost:8000';
-      
+
       // Start the preview asynchronously - don't await to avoid blocking project creation
       fetch(`${agentUrl}/api/preview/start`, {
         method: 'POST',
@@ -73,7 +73,7 @@ export async function createProject(prompt: string, name?: string) {
           env_vars: {}, // TODO: Add environment variables from database
         }),
       })
-        .then(async (response) => {
+        .then(async response => {
           if (response.ok) {
             const result = await response.json();
             console.log(`✅ Preview started for project ID: ${project.id}`, result);
@@ -82,7 +82,7 @@ export async function createProject(prompt: string, name?: string) {
             console.error(`❌ Error starting preview for project ID: ${project.id}:`, error);
           }
         })
-        .catch((err) => {
+        .catch(err => {
           console.error(`❌ Error in preview startup process for project ID: ${project.id}:`, err);
         });
     } catch (err: unknown) {
