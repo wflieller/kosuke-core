@@ -1,0 +1,5 @@
+### Pre-flight Checklist
+- [ ] Run `ruff format .` and `ruff check .` to ensure code quality.
+- [ ] Run `mypy app/` to check for type errors.
+- [ ] Run `bandit -r app/` to check for security vulnerabilities.
+- [ ] Run `pytest` to ensure all tests pass.

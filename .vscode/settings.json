@@ -17,9 +17,7 @@
         "**/tmp": true,
         "**/.next": true,
         "**/dist": true,
-        "**/__pycache__": true,
-        "**/.pytest_cache": true,
-        "**/projects": true
+        "**/__pycache__": true
     },
 
     // Search exclusions
@@ -30,8 +28,7 @@
         "**/tmp": true,
         "**/.next": true,
         "**/dist": true,
-        "**/__pycache__": true,
-        "**/projects": true
+        "**/__pycache__": true
     },
 
     // Python settings

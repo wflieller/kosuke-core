@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.groq import GroqModel
+
 
 from app.models.actions import Action
 from app.models.requests import ChatMessage
@@ -18,7 +20,10 @@ class LLMService:
     """
 
     def __init__(self):
-        self.model = AnthropicModel(settings.model_name, api_key=settings.anthropic_api_key)
+        if settings.llm_provider == "groq":
+            self.model = GroqModel(settings.model_name, api_key=settings.groq_api_key)
+        else:
+            self.model = AnthropicModel(settings.model_name, api_key=settings.anthropic_api_key)
 
         # Create PydanticAI agent with system prompt
         self.agent = Agent(model=self.model, system_prompt=self._get_system_prompt())
@@ -27,7 +32,7 @@ class LLMService:
         self, messages: list[ChatMessage], temperature: float | None = None, max_tokens: int | None = None
     ) -> str:
         """
-        Generate a completion using Claude 3.5 Sonnet
+        Generate a completion using the configured LLM provider
 
         Mirrors the TypeScript generateAICompletion function
         """
@@ -35,7 +40,7 @@ class LLMService:
         temperature = temperature or settings.temperature
         max_tokens = max_tokens or settings.max_tokens
 
-        print("🤖 Using Claude 3.5 Sonnet for completion")
+        print(f"🤖 Using {settings.llm_provider} for completion")
         print(f"📊 Request parameters: temperature={temperature}, maxTokens={max_tokens}")
 
         # Convert messages to the format expected by PydanticAI

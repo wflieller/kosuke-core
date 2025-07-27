@@ -1,7 +1,6 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
-pydantic-ai==0.0.14
 anthropic==0.40.0
 aiofiles==24.1.0
 tiktoken==0.8.0
@@ -21,4 +20,4 @@ pytest-cov==4.1.0
 mypy==1.7.1
 ruff==0.1.7
 bandit[toml]==1.7.5
-httpx==0.28.1 
+httpx==0.28.1

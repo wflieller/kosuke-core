@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
     # API Keys
-    anthropic_api_key: str
+    anthropic_api_key: str | None = None
+    groq_api_key: str | None = None
 
     # Logging
     log_level: str = "INFO"
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
     projects_dir: str = "/app/projects"
 
     # Model Configuration
+    llm_provider: str = "anthropic"
     model_name: str = "claude-3-5-sonnet-20241022"
     temperature: float = 0.7
 
@@ -38,8 +40,14 @@ class Settings(BaseSettings):
 
     def validate_settings(self) -> bool:
         """Validate that required settings are present"""
-        if not self.anthropic_api_key or self.anthropic_api_key == "your_api_key_here":
+        if self.llm_provider not in ["anthropic", "groq"]:
+            raise ValueError("LLM_PROVIDER must be either 'anthropic' or 'groq'")
+
+        if self.llm_provider == "anthropic" and (not self.anthropic_api_key or self.anthropic_api_key == "your_api_key_here"):
             raise ValueError("ANTHROPIC_API_KEY must be set to a valid API key")
+
+        if self.llm_provider == "groq" and (not self.groq_api_key or self.groq_api_key == "your_api_key_here"):
+            raise ValueError("GROQ_API_KEY must be set to a valid API key")
 
         if self.max_iterations <= 0:
             raise ValueError("MAX_ITERATIONS must be greater than 0")
@@ -60,6 +68,7 @@ try:
     print(f"   - Log level: {settings.log_level}")
     print(f"   - Max iterations: {settings.max_iterations}")
     print(f"   - Projects directory: {settings.projects_dir}")
+    print(f"   - LLM Provider: {settings.llm_provider}")
     print(f"   - Model: {settings.model_name}")
     print(f"   - Preview image: {settings.preview_default_image}")
 except ValueError as e:

@@ -554,6 +554,8 @@ import type { User } from '@/lib/db/schema';
 - **API Security**: Validate webhooks with proper secrets
 - **Database**: Use parameterized queries (Drizzle handles this)
 - **Environment**: Never commit secrets, use environment variables
+- **NEVER embed secrets in client-side code.** API keys, secrets, or other sensitive data must never be exposed in React components.
+- **Use Server-Side Proxies for Sensitive APIs**: All calls to external services that require a secret API key must be proxied through a Next.js API route (in `/app/api`). The client should call your API route, not the external service directly.
 
 ### Deployment & Production
 - **Platform**: Vercel with automatic deployments
@@ -597,6 +599,17 @@ Use the Rubric guidelines as a guide. You should ship only components that have 
 - Always run database migrations when schema changes are made
 - Test authentication flows and subscription management thoroughly
 - Implement proper error handling for all external service integrations
+
+### 💎 PRE-FLIGHT CHECKLIST - MANDATORY
+**Before you conclude your work on any task, you MUST perform the following checks sequentially.**
+**If any check fails, you MUST attempt to fix the issues before completing the task.**
+
+1.  **Format & Lint**: Run `npm run format` and `npm run lint`. All issues must be resolved.
+2.  **Type Check**: Your generated TypeScript code must be valid.
+3.  **Run Tests**: Run `npm test`. All existing and new tests must pass.
+4.  **Review Design Rubric**: Briefly review your UI changes against the Design Rubric. Ensure the implementation meets the standards for a score of 5, especially regarding responsiveness, skeleton states, and visual consistency.
+
+**Report the outcome of these checks in your final response.**
 
 ### Quick Setup Checklist for New Features
 1. **Database Changes**: Update schema → `npm run db:generate` → `npm run db:migrate`
